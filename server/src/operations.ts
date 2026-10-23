@@ -364,9 +364,9 @@ operationsRouter.get('/reports/trial-balance',requirePermission('reports.read'),
   const auth=authContext(req);const from=typeof req.query.from==='string'?req.query.from:null;const to=typeof req.query.to==='string'?req.query.to:null;
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
     `SELECT a.id,a.code,a.name,a.account_type,
-      COALESCE(sum(l.debit),0)::text AS debit,
-      COALESCE(sum(l.credit),0)::text AS credit,
-      COALESCE(sum(l.debit-l.credit),0)::text AS net
+      COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.debit ELSE 0 END),0)::text AS debit,
+      COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.credit ELSE 0 END),0)::text AS credit,
+      COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.debit-l.credit ELSE 0 END),0)::text AS net
      FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
      LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
        AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
@@ -381,7 +381,7 @@ operationsRouter.get('/reports/income-statement',requirePermission('reports.read
   const auth=authContext(req);const from=typeof req.query.from==='string'?req.query.from:null;const to=typeof req.query.to==='string'?req.query.to:null;
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
     `SELECT a.code,a.name,a.account_type,
-      COALESCE(sum(l.credit-l.debit),0)::text AS balance
+      COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.credit-l.debit ELSE 0 END),0)::text AS balance
      FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
      LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
        AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
@@ -396,8 +396,8 @@ operationsRouter.get('/reports/income-statement',requirePermission('reports.read
 operationsRouter.get('/reports/fee-balances',requirePermission('reports.read'),wrap(async(req,res)=>{
   const auth=authContext(req);const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
     `SELECT s.admission_number,s.full_name,i.invoice_number,i.academic_year,i.due_on,i.amount::text,
-      COALESCE(sum(a.amount),0)::text AS allocated,
-      (i.amount-COALESCE(sum(a.amount),0))::numeric(14,2)::text AS outstanding
+      COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)::text AS allocated,
+      (i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0))::numeric(14,2)::text AS outstanding
      FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
      LEFT JOIN fee_receipt_allocations a ON a.school_id=i.school_id AND a.invoice_id=i.id
      LEFT JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id AND r.status='posted'
@@ -414,7 +414,7 @@ operationsRouter.get('/reports/:report.csv',requirePermission('reports.export'),
   let rows:Record<string,unknown>[];
   if(name==='trial-balance'){
     const r=await withSchoolTransaction(auth.schoolId,c=>c.query(
-      `SELECT a.code,a.name,a.account_type,COALESCE(sum(l.debit),0)::text AS debit,COALESCE(sum(l.credit),0)::text AS credit
+      `SELECT a.code,a.name,a.account_type,COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.debit ELSE 0 END),0)::text AS debit,COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.credit ELSE 0 END),0)::text AS credit
        FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
        LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
         AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
