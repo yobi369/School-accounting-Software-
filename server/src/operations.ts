@@ -813,7 +813,7 @@ async function buildReportRows(c:any,schoolId:string,name:string,from:string|nul
        COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.credit-l.debit ELSE 0 END),0)::text AS credit_net
        FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
        LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
-       AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       AND ($2::date IS NULL OR j.posting_date <= $2::date)
        WHERE a.school_id=$1 AND a.account_type IN ('asset','liability','equity') GROUP BY a.id ORDER BY a.account_type,a.code`;break;
     case 'general-ledger':
       sql=`SELECT j.entry_number,j.posting_date,j.description AS journal_description,a.code,a.name AS account_name,l.debit::text,l.credit::text,l.memo
@@ -895,6 +895,10 @@ async function buildReportRows(c:any,schoolId:string,name:string,from:string|nul
        ORDER BY created_at DESC LIMIT 5000`;break;
     default: throw Object.assign(new Error('Report not found.'),{statusCode:404});
   }
+  const dateReports=['trial-balance','income-statement','general-ledger','cashbook','bankbook','receipts-register','invoice-register','fee-balances','expense-register','bank-reconciliation','journal-register','collections-by-method','audit-trail'];
+  if(name==='balance-sheet')params=[schoolId,to];
+  else if(dateReports.includes(name))params=[schoolId,from,to];
+  else params=[schoolId];
   const result=await c.query(sql,params);
   return result.rows as Record<string,unknown>[];
 }
@@ -905,20 +909,12 @@ function reportDateFilters(req:Request,res:Response):{from:string|null;to:string
   if(from&&to&&from>to){res.status(400).json({error:'Report start date must not be after end date.'});return null;}
   return {from,to};
 }
-operationsRouter.get('/reports/:report',requirePermission('reports.read'),wrap(async(req,res)=>{
-  const name=String(req.params.report);
-  if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
-  const dates=reportDateFilters(req,res);if(!dates)return;
-  const auth=authContext(req);
-  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to));
-  res.json({report:name,currency:'KES',from:dates.from,to:dates.to,rows});
-}));
 operationsRouter.get('/reports/:report.csv',requirePermission('reports.export'),wrap(async(req,res)=>{
   const name=String(req.params.report);if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
   const dates=reportDateFilters(req,res);if(!dates)return;const auth=authContext(req);
   const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to));
   const keys=rows.length?Object.keys(rows[0]):['no_data'];
-  const quote=(v:unknown)=>{let value=String(v??'');if(/^[=+@-]/.test(value))value="'"+value;return /[",\r\n]/.test(value)?'"'+value.replace(/"/g,'""')+'"':value;};
+  const quote=(v:unknown)=>{let value=String(v??'');if(/^[=+@]/.test(value)||/^-[A-Za-z]/.test(value))value="'"+value;return /[",\r\n]/.test(value)?'"'+value.replace(/"/g,'""')+'"':value;};
   const csv=[keys.map(quote).join(','),...rows.map(row=>keys.map(k=>quote(row[k])).join(','))].join('\r\n');
   res.setHeader('Content-Type','text/csv; charset=utf-8');res.setHeader('Content-Disposition',`attachment; filename="${name}-${todayIso()}.csv"`);res.status(200).send(csv);
 }));
@@ -950,3 +946,12 @@ operationsRouter.get('/reports/:report.pdf',requirePermission('reports.export'),
   doc.end();
 }));
 function labelsForReport(key:string):string{return labels[key]??key.replaceAll('_',' ');}
+
+operationsRouter.get('/reports/:report',requirePermission('reports.read'),wrap(async(req,res)=>{
+  const name=String(req.params.report);
+  if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
+  const dates=reportDateFilters(req,res);if(!dates)return;
+  const auth=authContext(req);
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to));
+  res.json({report:name,currency:'KES',from:dates.from,to:dates.to,rows});
+}));
