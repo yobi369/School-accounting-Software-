@@ -14,10 +14,16 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
   const incomeId = randomUUID();
   const studentA = randomUUID();
   const studentB = randomUUID();
+  const userId = randomUUID();
+  const roleA = randomUUID();
+  const roleB = randomUUID();
 
   it('enforces tenant row-level security and posted-journal immutability', async () => {
     await withSchoolTransaction(schoolA, async c => {
       await c.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[schoolA,'Integration School A',codeA]);
+      await c.query('INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',[userId,`multi-${codeA.toLowerCase()}@example.test`,'test-hash','Multi School User']);
+      await c.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[roleA,schoolA,'auditor']);
+      await c.query('INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,$4)',[schoolA,userId,roleA,'active']);
       await c.query('INSERT INTO students (id,school_id,admission_number,full_name) VALUES ($1,$2,$3,$4)',[studentA,schoolA,'TEST-A','Test Student A']);
       await c.query('INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',[yearId,schoolA,'Test Year','2026-01-01','2026-12-31']);
       await c.query('INSERT INTO accounting_periods (id,school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',[periodId,schoolA,yearId,'2026-01-01','2026-12-31']);
@@ -25,10 +31,14 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
     });
     await withSchoolTransaction(schoolB, async c => {
       await c.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[schoolB,'Integration School B',codeB]);
+      await c.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[roleB,schoolB,'accountant']);
+      await c.query('INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,$4)',[schoolB,userId,roleB,'active']);
       await c.query('INSERT INTO students (id,school_id,admission_number,full_name) VALUES ($1,$2,$3,$4)',[studentB,schoolB,'TEST-B','Test Student B']);
     });
     const isolated = await withSchoolTransaction(schoolA,c=>c.query('SELECT id FROM students WHERE school_id=$1',[schoolB]));
     expect(isolated.rowCount).toBe(0);
+    const workspaces=await withSchoolTransaction(schoolA,async c=>{await c.query("SELECT set_config('app.user_id',$1,true)",[userId]);return c.query('SELECT sc.id,sc.name FROM school_memberships m JOIN schools sc ON sc.id=m.school_id WHERE m.user_id=$1 AND m.status=\'active\' ORDER BY sc.name',[userId]);});
+    expect(workspaces.rows.map((row: {id:string})=>row.id).sort()).toEqual([schoolA,schoolB].sort());
 
     const journalId = randomUUID();
     await withSchoolTransaction(schoolA, async c => {
