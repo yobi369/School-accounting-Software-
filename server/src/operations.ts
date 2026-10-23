@@ -962,7 +962,7 @@ async function buildReportRows(c:any,schoolId:string,name:string,from:string|nul
       sql=`SELECT j.posting_date,j.entry_number,j.description,a.code,a.name,l.debit::text,l.credit::text,l.memo
        FROM journal_lines l JOIN accounts a ON a.id=l.account_id AND a.school_id=l.school_id
        JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id
-       WHERE l.school_id=$1 AND j.status='posted' AND a.code=${name==='cashbook'?"'1000'":"'1100'"}
+       WHERE l.school_id=$1 AND j.status='posted' AND ${name==='cashbook'?"a.code='1000'":"EXISTS (SELECT 1 FROM bank_accounts ba WHERE ba.school_id=a.school_id AND ba.ledger_account_id=a.id)"}
        AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
        ORDER BY j.posting_date,j.entry_number LIMIT 10000`;break;
     case 'receipts-register':
