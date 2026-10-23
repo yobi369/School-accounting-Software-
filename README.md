@@ -12,6 +12,10 @@ ShuleLedger is a school-finance workspace for Kenyan primary and secondary schoo
 - Installable PWA shell and durable IndexedDB queue for offline expense drafts. Offline drafts are pending, never posted, until server acceptance and approval.
 - GitHub Actions run PostgreSQL migrations, tenant/ledger integration tests, a disposable database dump/restore smoke test, TypeScript checks, and production builds.
 
+## Licensing
+
+**Proprietary — all rights reserved.** Public source visibility does not grant permission to copy, modify, redistribute, host, or sell ShuleLedger. Commercial use requires prior written authorization. See [LICENSE](LICENSE) and [licensing policy](docs/LICENSING.md). Third-party dependencies retain their own licenses.
+
 ## Technology
 
 - Frontend: React, TypeScript, Vite.
