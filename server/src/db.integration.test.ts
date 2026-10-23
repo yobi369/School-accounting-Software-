@@ -37,6 +37,15 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
     });
     const isolated = await withSchoolTransaction(schoolA,c=>c.query('SELECT id FROM students WHERE school_id=$1',[schoolB]));
     expect(isolated.rowCount).toBe(0);
+    // Row-level security must also reject cross-school writes, not merely hide rows.
+    await expect(withSchoolTransaction(schoolA, c =>
+      c.query('INSERT INTO students (id,school_id,admission_number,full_name) VALUES ($1,$2,$3,$4)',
+        [randomUUID(),schoolB,'CROSS-TENANT','Must be rejected'])
+    )).rejects.toThrow();
+    const ownRows = await withSchoolTransaction(schoolA, c =>
+      c.query('SELECT id FROM students WHERE school_id=$1 ORDER BY id',[schoolA]));
+    expect(ownRows.rows.map((row: {id:string})=>row.id)).toContain(studentA);
+    expect(ownRows.rows.map((row: {id:string})=>row.id)).not.toContain(studentB);
     const workspaces=await withSchoolTransaction(schoolA,async c=>{await c.query("SELECT set_config('app.user_id',$1,true)",[userId]);return c.query('SELECT sc.id,sc.name FROM school_memberships m JOIN schools sc ON sc.id=m.school_id WHERE m.user_id=$1 AND m.status=\'active\' ORDER BY sc.name',[userId]);});
     expect(workspaces.rows.map((row: {id:string})=>row.id).sort()).toEqual([schoolA,schoolB].sort());
     await expect(withSchoolTransaction(schoolA,c=>c.query('INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,$4)',[schoolA,userId,roleB,'active']))).rejects.toThrow();
