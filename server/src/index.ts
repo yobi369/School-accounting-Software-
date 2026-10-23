@@ -1,4 +1,5 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
+import { resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { authContext, createSession, hashPassword, requireAuth, requirePermission, safeSecretEquals, verifyPassword } from './auth.js';
@@ -376,6 +377,13 @@ app.post('/api/v1/dev/validate-journal', (req,res) => {
 });
 
 app.use('/api/v1', operationsRouter);
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(resolve(process.cwd(), 'dist'), { index: false, maxAge: '1h' }));
+  app.get(/.*/, (req, res, next) => {
+    if (req.path.startsWith('/api/')) { next(); return; }
+    res.sendFile(resolve(process.cwd(), 'dist', 'index.html'));
+  });
+}
 app.use((_req,res) => { res.status(404).json({error:'Not found'}); });
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   const code = (error as { code?: string })?.code;

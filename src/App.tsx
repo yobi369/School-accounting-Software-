@@ -72,7 +72,8 @@ function Login({onSuccess}:{onSuccess:(session:SchoolSession)=>void}){
       const response=await fetch('/api/v1/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({schoolId,email,password})});
       const body=await response.json();if(!response.ok)throw new Error(body.error??'Sign-in failed.');
       const session:SchoolSession={token:body.token,expiresAt:body.expiresAt,user:body.user,school:body.school};
-      saveSession(session);onSuccess(session);
+      const me=await apiRequest<{user:SchoolSession['user'];school:SchoolSession['school'];role:string;permissions:string[]}>('/auth/me',session);
+      const full={...session,user:me.user,school:me.school,role:me.role,permissions:me.permissions};saveSession(full);onSuccess(full);
     }catch(err){setError(err instanceof Error?err.message:'Could not sign in.');}finally{setBusy(false);}}}>
       <label>School workspace ID<input required value={schoolId} onChange={e=>setSchoolId(e.target.value.trim())} placeholder="UUID provided by your administrator"/></label>
       <label>Email address<input required type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@school.ac.ke"/></label>
@@ -116,7 +117,7 @@ function Workspace({session,onLogout}:{session:SchoolSession;onLogout:()=>void})
       if(page==='fees'){const [invoices,students]=await Promise.all([apiRequest('/fees/invoices',session),apiRequest('/students',session)]);next={...(invoices as object),...(students as object)};}
       if(page==='expenses'){const [expenses,accounts]=await Promise.all([apiRequest('/expenses',session),apiRequest('/ledger/accounts',session)]);next={...(expenses as object),...(accounts as object)};}
       if(page==='ledger'){const [accounts,journals,periods]=await Promise.all([apiRequest('/ledger/accounts',session),apiRequest('/ledger/journals',session),apiRequest('/accounting/periods',session)]);next={...(accounts as object),...(journals as object),...(periods as object)};}
-      if(page==='bank')next=await apiRequest('/bank/accounts',session) as Record<string,unknown>;
+      if(page==='bank'){const [bankAccounts,ledgerAccounts]=await Promise.all([apiRequest('/bank/accounts',session),apiRequest('/ledger/accounts',session)]);next={...(bankAccounts as object),ledgerAccounts:(ledgerAccounts as Record<string,unknown>).accounts};}
       if(page==='audit')next=await apiRequest('/audit-events',session) as Record<string,unknown>;
       if(page==='users')next=await apiRequest('/users',session) as Record<string,unknown>;
       if(page==='settings')next=await apiRequest('/accounting/periods',session) as Record<string,unknown>;
@@ -129,7 +130,7 @@ function Workspace({session,onLogout}:{session:SchoolSession;onLogout:()=>void})
   useEffect(()=>{const update=()=>setOnline(navigator.onLine);window.addEventListener('online',update);window.addEventListener('offline',update);void refreshOffline();return()=>{window.removeEventListener('online',update);window.removeEventListener('offline',update);};},[refreshOffline]);
   const rows=(key:string):Row[]=>Array.isArray(data[key])?data[key] as Row[]:[];
   const students=rows('students');const invoices=rows('invoices');const accounts=rows('accounts');const expenses=rows('expenses');const periods=rows('periods');const banks=rows('accounts');const users=rows('users');const journals=rows('journals');const events=rows('events');
-  const accountOptions=accounts.map(a=>({label:`${human(a.code)} — ${human(a.name)} (${human(a.account_type)})`,value:String(a.id)}));
+  const accountOptions=(active==='bank'?rows('ledgerAccounts'):accounts).map(a=>({label:`${human(a.code)} — ${human(a.name)} (${human(a.account_type)})`,value:String(a.id)}));
   const studentOptions=students.map(s=>({label:`${human(s.admission_number)} — ${human(s.full_name)}`,value:String(s.id)}));
   const invoiceOptions=invoices.map(i=>({label:`${human(i.invoice_number)} — ${human(i.student_name)} — KES ${human(i.outstanding??i.amount)}`,value:String(i.id)}));
   const periodOptions=periods.filter(p=>p.status==='open').map(p=>({label:`${human(p.financial_year_name)} · ${human(p.starts_on)} to ${human(p.ends_on)}`,value:String(p.period_id)}));
