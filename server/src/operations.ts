@@ -643,15 +643,19 @@ operationsRouter.post('/accounting/years/:id/close',requirePermission('periods.m
   const auth=authContext(req);
   try{
     const year=await withSchoolTransaction(auth.schoolId,async c=>{
-      const r=await c.query("SELECT id,status,ends_on FROM financial_years WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
+      const r=await c.query("SELECT id,status,name,starts_on,ends_on FROM financial_years WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
       if(!r.rowCount)throw Object.assign(new Error('Financial year not found.'),{statusCode:404});
-      if(r.rows[0].status==='closed')return {id:id.data,status:'closed',closingJournalId:null};
+      if(r.rows[0].status==='closed')return {id:id.data,status:'closed',closingJournalId:null,openingJournalId:null};
       const periods=await c.query("SELECT id,status,ends_on FROM accounting_periods WHERE school_id=$1 AND financial_year_id=$2 ORDER BY ends_on",[auth.schoolId,id.data]);
       if(!periods.rowCount)throw Object.assign(new Error('The financial year has no accounting periods.'),{statusCode:409});
       const last=periods.rows[periods.rows.length-1];
       if(periods.rows.slice(0,-1).some(p=>p.status!=='locked')||!['open','locked'].includes(last.status))throw Object.assign(new Error('Lock all earlier periods before closing the year. The final period must be open or locked.'),{statusCode:409});
       const drafts=await c.query("SELECT count(*)::int AS n FROM journal_entries WHERE school_id=$1 AND financial_year_id=$2 AND status='draft'",[auth.schoolId,id.data]);
       if(drafts.rows[0].n>0)throw Object.assign(new Error('Post or discard every draft journal before year-end close.'),{statusCode:409});
+      const totals=await c.query(
+        "SELECT COALESCE(sum(l.debit),0)::text AS debit,COALESCE(sum(l.credit),0)::text AS credit FROM journal_entries j JOIN journal_lines l ON l.school_id=j.school_id AND l.journal_entry_id=j.id WHERE j.school_id=$1 AND j.financial_year_id=$2 AND j.status='posted'",
+        [auth.schoolId,id.data]);
+      if(parseKesToMinorUnits(String(totals.rows[0].debit))!==parseKesToMinorUnits(String(totals.rows[0].credit)))throw Object.assign(new Error('Trial balance is not balanced. Resolve the difference before closing the year.'),{statusCode:409});
       if(last.status==='locked')await c.query("UPDATE accounting_periods SET status='open' WHERE school_id=$1 AND id=$2",[auth.schoolId,last.id]);
       const balances=await c.query(
         `SELECT a.id,a.account_type,
@@ -677,15 +681,53 @@ operationsRouter.post('/accounting/years/:id/close',requirePermission('periods.m
       let closingJournalId:string|null=null;
       if(closingLines.length){
         const difference=totalDebits-totalCredits;
-        if(difference>0n){closingLines.push({accountCode:'3000',debit:'0.00',credit:amountString(difference)});}
-        else if(difference<0n){closingLines.push({accountCode:'3000',debit:amountString(-difference),credit:'0.00'});}
-        const posted=await postJournal(c,auth.schoolId,auth.userId,String(r.rows[0].ends_on).slice(0,10),`Year-end close ${r.rows[0].id}`,'year_end_close',id.data,closingLines);
+        if(difference>0n)closingLines.push({accountCode:'3000',debit:'0.00',credit:amountString(difference)});
+        else if(difference<0n)closingLines.push({accountCode:'3000',debit:amountString(-difference),credit:'0.00'});
+        const posted=await postJournal(c,auth.schoolId,auth.userId,String(r.rows[0].ends_on).slice(0,10),`Year-end close ${r.rows[0].name}`,'year_end_close',id.data,closingLines);
         closingJournalId=posted.id;
+      }
+      const nextDates=await c.query("SELECT (ends_on+1)::date::text AS starts_on,((ends_on+1)+interval '1 year'-interval '1 day')::date::text AS ends_on FROM financial_years WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data]);
+      const nextStart=String(nextDates.rows[0].starts_on).slice(0,10);const nextEnd=String(nextDates.rows[0].ends_on).slice(0,10);
+      let nextYear=await c.query("SELECT id,status,name FROM financial_years WHERE school_id=$1 AND starts_on=$2::date AND ends_on=$3::date FOR UPDATE",[auth.schoolId,nextStart,nextEnd]);
+      let nextYearId:string;
+      if(nextYear.rowCount){
+        if(nextYear.rows[0].status!=='open')throw Object.assign(new Error('The following financial year already exists but is not open.'),{statusCode:409});
+        nextYearId=String(nextYear.rows[0].id);
+      }else{
+        nextYearId=randomUUID();const name=nextStart.slice(0,4)===nextEnd.slice(0,4)?nextStart.slice(0,4):nextStart.slice(0,4)+'/'+nextEnd.slice(0,4);
+        await c.query('INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',[nextYearId,auth.schoolId,name,nextStart,nextEnd]);
+        await c.query(
+          `INSERT INTO accounting_periods (school_id,financial_year_id,starts_on,ends_on)
+           SELECT $1,$2,GREATEST($3::date,date_trunc('month',m)::date),LEAST($4::date,(date_trunc('month',m)+interval '1 month - 1 day')::date)
+           FROM generate_series(date_trunc('month',$3::date),date_trunc('month',$4::date),interval '1 month') m`,
+          [auth.schoolId,nextYearId,nextStart,nextEnd]);
+      }
+      const existingOpening=await c.query("SELECT id FROM journal_entries WHERE school_id=$1 AND financial_year_id=$2 AND source_type='year_opening' AND source_id=$3 AND status='posted'",[auth.schoolId,nextYearId,id.data]);
+      let openingJournalId:string|null=existingOpening.rowCount?String(existingOpening.rows[0].id):null;
+      if(!openingJournalId){
+        const nextPosted=await c.query("SELECT count(*)::int AS n FROM journal_entries WHERE school_id=$1 AND financial_year_id=$2 AND status='posted'",[auth.schoolId,nextYearId]);
+        if(nextPosted.rows[0].n>0)throw Object.assign(new Error('The next financial year already contains postings. Review its opening balances before closing this year.'),{statusCode:409});
+        const balanceSheet=await c.query(
+          `SELECT a.id,COALESCE(sum(l.debit-l.credit) FILTER (WHERE j.id IS NOT NULL),0)::text AS net
+           FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
+           LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted' AND j.financial_year_id=$2
+           WHERE a.school_id=$1 AND a.account_type IN ('asset','liability','equity')
+           GROUP BY a.id ORDER BY a.code`,[auth.schoolId,id.data]);
+        const openingLines:PostingLine[]=[];
+        for(const row of balanceSheet.rows){
+          const net=BigInt(String(row.net).split('.')[0])*100n+BigInt((String(row.net).split('.')[1]??'00').padEnd(2,'0'));
+          if(net>0n)openingLines.push({accountId:String(row.id),debit:amountString(net),credit:'0.00'});
+          else if(net<0n)openingLines.push({accountId:String(row.id),debit:'0.00',credit:amountString(-net)});
+        }
+        if(openingLines.length){
+          const posted=await postJournal(c,auth.schoolId,auth.userId,nextStart,'Opening balances from financial year '+String(r.rows[0].name),'year_opening',id.data,openingLines);
+          openingJournalId=posted.id;
+        }
       }
       await c.query("UPDATE accounting_periods SET status='locked' WHERE school_id=$1 AND id=$2",[auth.schoolId,last.id]);
       await c.query("UPDATE financial_years SET status='closed' WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data]);
-      await audit(c,auth.schoolId,auth.userId,'accounting.year.close','financial_year',id.data,{closingJournalId});
-      return {id:id.data,status:'closed',closingJournalId};
+      await audit(c,auth.schoolId,auth.userId,'accounting.year.close','financial_year',id.data,{closingJournalId,openingJournalId,nextFinancialYearId:nextYearId});
+      return {id:id.data,status:'closed',closingJournalId,openingJournalId,nextFinancialYearId:nextYearId};
     });
     res.json({financialYear:year});
   }catch(error){if(!handleError(res,error))throw error;}
