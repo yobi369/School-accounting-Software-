@@ -90,9 +90,10 @@ function ChangePassword({session,onChanged,onLogout}:{session:SchoolSession;onCh
   return <main className="sl-auth-shell"><section className="sl-auth-card"><div className="sl-brand-mark">S</div><h1>Set your password</h1>
     <p className="sl-muted">Your administrator issued an initial password. Change it before opening school records.</p>
     <form onSubmit={async e=>{e.preventDefault();setError('');if(newPassword!==confirm){setError('The new passwords do not match.');return;}setBusy(true);try{
-      await apiRequest('/auth/change-password',session,{method:'POST',body:JSON.stringify({currentPassword,newPassword})});
-      const me=await apiRequest<{user:SchoolSession['user'];school:SchoolSession['school'];role:string;permissions:string[]}>('/auth/me',{...session,user:{...session.user,mustChangePassword:false}});
-      const next={...session,user:me.user,school:me.school,role:me.role,permissions:me.permissions};saveSession(next);onChanged(next);
+      const rotated=await apiRequest<{token:string;expiresAt:string}>('/auth/change-password',session,{method:'POST',body:JSON.stringify({currentPassword,newPassword})});
+      const renewed={...session,token:rotated.token,expiresAt:rotated.expiresAt,user:{...session.user,mustChangePassword:false}};
+      const me=await apiRequest<{user:SchoolSession['user'];school:SchoolSession['school'];role:string;permissions:string[]}>('/auth/me',renewed);
+      const next={...renewed,user:me.user,school:me.school,role:me.role,permissions:me.permissions};saveSession(next);onChanged(next);
     }catch(err){setError(err instanceof Error?err.message:'Password update failed.');}finally{setBusy(false);}}}>
       <label>Current password<input required type="password" value={currentPassword} onChange={e=>setCurrent(e.target.value)}/></label>
       <label>New password (12 characters minimum)<input required minLength={12} type="password" value={newPassword} onChange={e=>setNew(e.target.value)}/></label>
