@@ -102,12 +102,13 @@ function ChangePassword({session,onChanged,onLogout}:{session:SchoolSession;onCh
     </form><button className="sl-link" onClick={onLogout}>Sign out</button>
   </section></main>;
 }
-function Workspace({session,onLogout}:{session:SchoolSession;onLogout:()=>void}){
+function Workspace({session,onLogout,onSwitch}:{session:SchoolSession;onLogout:()=>void;onSwitch:(s:SchoolSession)=>void}){
   const [active,setActive]=useState('overview');const [data,setData]=useState<Record<string,unknown>>({});
   const [busy,setBusy]=useState(false);const [error,setError]=useState('');const [notice,setNotice]=useState('');
   const [online,setOnline]=useState(navigator.onLine);const [offlineItems,setOfflineItems]=useState<QueuedMutation[]>([]);
   const [csv,setCsv]=useState('date,description,reference,amount\n');
   const [selectedBank,setSelectedBank]=useState('');
+  const [workspaces,setWorkspaces]=useState<{school_id:string;school_name:string;role_name:string}[]>([]);
   const [report,setReport]=useState<Row[]>([]);
   const load=useCallback(async(page:string)=>{
     setBusy(true);setError('');
@@ -134,6 +135,7 @@ function Workspace({session,onLogout}:{session:SchoolSession;onLogout:()=>void})
   },[session]);
   const refreshOffline=useCallback(async()=>{try{setOfflineItems(await listOfflineMutations());}catch{setOfflineItems([]);}},[]);
   useEffect(()=>{void load(active);},[active,load]);
+  useEffect(()=>{void apiRequest<{workspaces:{school_id:string;school_name:string;role_name:string}[]}>('/auth/workspaces',session).then(r=>setWorkspaces(r.workspaces)).catch(()=>setWorkspaces([]));},[session]);
   useEffect(()=>{const update=()=>setOnline(navigator.onLine);window.addEventListener('online',update);window.addEventListener('offline',update);void refreshOffline();return()=>{window.removeEventListener('online',update);window.removeEventListener('offline',update);};},[refreshOffline]);
   const rows=(key:string):Row[]=>Array.isArray(data[key])?data[key] as Row[]:[];
   const students=rows('students');const invoices=rows('invoices');const accounts=rows('accounts');const expenses=rows('expenses');const periods=rows('periods');const banks=rows('accounts');const users=rows('users');const journals=rows('journals');const events=rows('events');const waivers=rows('waivers');const suppliers=rows('suppliers');const budgets=rows('budgets');const statementLines=rows('statementLines');const journalLineRows=rows('journalLines');const roles=rows('roles');const permissions=rows('permissions');
@@ -156,7 +158,7 @@ function Workspace({session,onLogout}:{session:SchoolSession;onLogout:()=>void})
       <nav className="sl-nav">{navigation.map(n=><button key={n.id} className={active===n.id?'selected':''} onClick={()=>{setActive(n.id);setReport([]);setNotice('');}}><span>{n.icon}</span>{n.label}</button>)}</nav>
       <div className="sl-side-foot"><span className={online?'sl-online':'sl-offline'}></span>{online?'Online':'Offline'} · {offlineItems.length} local drafts</div>
     </aside>
-    <main className="sl-main"><header className="sl-topbar"><div><small>School workspace /</small><b>{title}</b></div><div className="sl-top-actions"><span>{session.user.fullName}</span><button className="sl-outline" onClick={async()=>{try{await apiRequest('/auth/logout',session,{method:'POST'});}catch{}onLogout();}}>Sign out</button></div></header>
+    <main className="sl-main"><header className="sl-topbar"><div><small>School workspace /</small><b>{title}</b></div><div className="sl-top-actions"><span>{session.user.fullName}</span>{workspaces.length>1&&<select className="sl-workspace-select" aria-label="Switch school workspace" value={session.school.id} onChange={async e=>{try{const switched=await apiRequest<SchoolSession>('/auth/switch-workspace',session,{method:'POST',body:JSON.stringify({schoolId:e.target.value})});saveSession(switched);onSwitch(switched);}catch(err){setError(err instanceof Error?err.message:'Workspace switch failed.');}}}>{workspaces.map(w=><option key={w.school_id} value={w.school_id}>{w.school_name}</option>)}</select>}<button className="sl-outline" onClick={async()=>{try{await apiRequest('/auth/logout',session,{method:'POST'});}catch{}onLogout();}}>Sign out</button></div></header>
       <section className="sl-content"><div className="sl-page-head"><div><p className="sl-eyebrow">SHULELEDGER · KES · AFRICA/NAIROBI</p><h1>{title}</h1><p className="sl-muted">School records are loaded from the authenticated server workspace.</p></div><button className="sl-outline" onClick={()=>void load(active)} disabled={busy}>↻ Refresh</button></div>
         {!online&&<div className="sl-banner">Offline: financial postings are disabled. Only queued expense drafts can sync when you reconnect.</div>}
         {notice&&<div className="sl-success">{notice}<button onClick={()=>setNotice('')}>×</button></div>}
@@ -193,5 +195,5 @@ export default function App(){
   if(!checked)return <main className="sl-auth-shell"><div className="sl-loading">Opening secure workspace…</div></main>;
   if(!session)return <Login onSuccess={setSession}/>;
   if(session.user.mustChangePassword)return <ChangePassword session={session} onChanged={setSession} onLogout={logout}/>;
-  return <Workspace session={session} onLogout={logout}/>;
+  return <Workspace session={session} onLogout={logout} onSwitch={setSession}/>;
 }
