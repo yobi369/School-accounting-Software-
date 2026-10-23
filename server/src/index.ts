@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { authContext, createSession, hashPassword, requireAuth, requirePermission, safeSecretEquals, verifyPassword } from './auth.js';
 import { pool, requirePool, withSchoolTransaction } from './db.js';
+import { operationsRouter } from './operations.js';
 import { formatMinorUnitsKes, parseKesToMinorUnits, validateJournal } from './domain/ledger.js';
 
 const app = express();
@@ -344,6 +345,7 @@ app.post('/api/v1/dev/validate-journal', (req,res) => {
   } catch(error) { res.status(422).json({valid:false,error:error instanceof Error?error.message:'Journal validation failed',posted:false}); }
 });
 
+app.use('/api/v1', operationsRouter);
 app.use((_req,res) => { res.status(404).json({error:'Not found'}); });
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   const code = (error as { code?: string })?.code;
