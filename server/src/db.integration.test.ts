@@ -94,24 +94,36 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
     await expect(withSchoolTransaction(schoolA,c=>c.query('INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,$4)',[schoolA,userId,roleB,'active']))).rejects.toThrow();
 
     const journalId = randomUUID();
-    await withSchoolTransaction(schoolA, async c => {
+    const insertedLineIds = await withSchoolTransaction(schoolA, async c => {
       await c.query("INSERT INTO journal_entries (id,school_id,financial_year_id,period_id,entry_number,posting_date,description,status,source_type) VALUES ($1,$2,$3,$4,1,'2026-03-01','Integration posting','draft','test')",[journalId,schoolA,yearId,periodId]);
       const insertedLines=await c.query("INSERT INTO journal_lines (school_id,journal_entry_id,account_id,line_number,debit,credit) VALUES ($1,$2,$3,1,100.00,0),($1,$2,$4,2,0,100.00) RETURNING id",[schoolA,journalId,cashId,incomeId]);
       await c.query("UPDATE journal_entries SET status='posted' WHERE school_id=$1 AND id=$2",[schoolA,journalId]);
       const posted = await c.query('SELECT status,posted_at FROM journal_entries WHERE school_id=$1 AND id=$2',[schoolA,journalId]);
       expect(posted.rows[0].status).toBe('posted');
       expect(posted.rows[0].posted_at).toBeTruthy();
-      await expect(c.query("UPDATE journal_entries SET description='tampered' WHERE school_id=$1 AND id=$2",[schoolA,journalId])).rejects.toThrow();
-      await expect(c.query('UPDATE journal_lines SET debit=200 WHERE school_id=$1 AND id=$2',[schoolA,insertedLines.rows[0].id])).rejects.toThrow();
-      await expect(c.query('DELETE FROM journal_lines WHERE school_id=$1 AND id=$2',[schoolA,insertedLines.rows[1].id])).rejects.toThrow();
+      return insertedLines.rows.map((row:{id:string})=>row.id);
+    });
 
-      // Database-level posting integrity must reject an unbalanced draft even if
-      // an application handler or caller attempts to bypass domain validation.
-      const unbalancedId=randomUUID();
+    // Each expected database failure gets its own transaction. PostgreSQL marks
+    // a transaction failed after a constraint/trigger error until it is rolled back.
+    await expect(withSchoolTransaction(schoolA,c=>
+      c.query("UPDATE journal_entries SET description='tampered' WHERE school_id=$1 AND id=$2",[schoolA,journalId])
+    )).rejects.toThrow(/Posted journal entries are immutable/);
+    await expect(withSchoolTransaction(schoolA,c=>
+      c.query('UPDATE journal_lines SET debit=200 WHERE school_id=$1 AND id=$2',[schoolA,insertedLineIds[0]])
+    )).rejects.toThrow();
+    await expect(withSchoolTransaction(schoolA,c=>
+      c.query('DELETE FROM journal_lines WHERE school_id=$1 AND id=$2',[schoolA,insertedLineIds[1]])
+    )).rejects.toThrow();
+
+    // Database-level posting integrity rejects unbalanced drafts even when a
+    // caller bypasses application-layer domain validation.
+    const unbalancedId=randomUUID();
+    await expect(withSchoolTransaction(schoolA,async c=>{
       await c.query("INSERT INTO journal_entries (id,school_id,financial_year_id,period_id,entry_number,posting_date,description,status,source_type) VALUES ($1,$2,$3,$4,2,'2026-03-02','Unbalanced integration posting','draft','test')",[unbalancedId,schoolA,yearId,periodId]);
       await c.query("INSERT INTO journal_lines (school_id,journal_entry_id,account_id,line_number,debit,credit) VALUES ($1,$2,$3,1,100.00,0),($1,$2,$4,2,0,99.00)",[schoolA,unbalancedId,cashId,incomeId]);
-      await expect(c.query("UPDATE journal_entries SET status='posted' WHERE school_id=$1 AND id=$2",[schoolA,unbalancedId])).rejects.toThrow(/equal, positive debit and credit totals/);
-    });
+      await c.query("UPDATE journal_entries SET status='posted' WHERE school_id=$1 AND id=$2",[schoolA,unbalancedId]);
+    })).rejects.toThrow(/equal, positive debit and credit totals/);
   });
 });
 
