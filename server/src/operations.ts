@@ -119,7 +119,8 @@ operationsRouter.get('/fees/invoices',requirePermission('fees.read'),wrap(async(
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
     `SELECT i.id,i.invoice_number,i.student_id,s.admission_number,s.full_name AS student_name,
       i.academic_year,i.description,i.issued_on,i.due_on,i.amount::text,i.status,
-      COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated
+      COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
+      (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
      FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
      WHERE i.school_id=$1 ORDER BY i.issued_on DESC,i.invoice_number DESC LIMIT 500`,[auth.schoolId]));
   res.json({invoices:result.rows});
