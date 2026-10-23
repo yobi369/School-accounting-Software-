@@ -462,6 +462,26 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
   res.json({schoolId:auth.schoolId,summary:data});
 }));
 
+
+const openingBalanceSchema=z.object({financialYearId:z.string().uuid(),postingDate:z.string().regex(/^\d{4}-\d{2}-\d{2}$/),description:z.string().trim().min(3).max(500),lines:z.array(z.object({accountId:z.string().uuid(),debit:z.string(),credit:z.string(),memo:z.string().max(500).optional()})).min(2).max(500)});
+operationsRouter.post('/accounting/opening-balances',requirePermission('school.manage'),wrap(async(req,res)=>{
+  const p=openingBalanceSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Invalid opening balance journal.',details:p.error.flatten()});return;}
+  const auth=authContext(req);const d=p.data;
+  try{
+    const result=await withSchoolTransaction(auth.schoolId,async c=>{
+      const year=await c.query("SELECT id,starts_on,status FROM financial_years WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,d.financialYearId]);
+      if(!year.rowCount||year.rows[0].status!=='open'||String(year.rows[0].starts_on).slice(0,10)!==d.postingDate)throw Object.assign(new Error('Opening balances must be posted on the start date of an open financial year.'),{statusCode:422});
+      const existing=await c.query("SELECT count(*)::int AS n FROM journal_entries WHERE school_id=$1 AND financial_year_id=$2 AND status='posted'",[auth.schoolId,d.financialYearId]);
+      if(existing.rows[0].n>0)throw Object.assign(new Error('Opening balances can only be posted before any other journal in the financial year.'),{statusCode:409});
+      const lines=d.lines.map(l=>({accountId:l.accountId,debit:amountString(parseKesToMinorUnits(l.debit)),credit:amountString(parseKesToMinorUnits(l.credit)),memo:l.memo}));
+      const journal=await postJournal(c,auth.schoolId,auth.userId,d.postingDate,d.description,'opening_balance',d.financialYearId,lines);
+      await audit(c,auth.schoolId,auth.userId,'accounting.opening_balances.post','journal_entry',journal.id,{financialYearId:d.financialYearId,lineCount:lines.length});
+      return journal;
+    });
+    res.status(201).json({journal:result});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
 operationsRouter.get('/accounting/periods',requirePermission('ledger.read'),wrap(async(req,res)=>{
   const auth=authContext(req);
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
