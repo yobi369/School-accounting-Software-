@@ -69,6 +69,28 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
     expect(await authenticateRequest(request)).toBeNull();
     await withSchoolTransaction(schoolA,c=>c.query(
       "UPDATE school_memberships SET status='active' WHERE school_id=$1 AND user_id=$2",[schoolA,userId]));
+
+    // Concurrent retries with the same offline mutation ID must produce one durable receipt.
+    const mutationId=randomUUID();
+    const requestHash='a'.repeat(64);
+    const submitMutation=()=>withSchoolTransaction(schoolA,async c=>{
+      await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[mutationId]);
+      const existing=await c.query(
+        'SELECT request_hash,resource_id FROM offline_sync_receipts WHERE school_id=$1 AND client_mutation_id=$2 FOR UPDATE',
+        [schoolA,mutationId]);
+      if(existing.rowCount)return {duplicate:true,resourceId:String(existing.rows[0].resource_id)};
+      const resourceId=randomUUID();
+      await c.query(
+        'INSERT INTO offline_sync_receipts (school_id,client_mutation_id,request_hash,resource_type,resource_id,response_body,created_by) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)',
+        [schoolA,mutationId,requestHash,'expense',resourceId,JSON.stringify({status:'accepted',serverId:resourceId}),userId]);
+      return {duplicate:false,resourceId};
+    });
+    const retries=await Promise.all([submitMutation(),submitMutation()]);
+    expect(retries.filter(x=>!x.duplicate)).toHaveLength(1);
+    expect(retries[0].resourceId).toBe(retries[1].resourceId);
+    const receiptCount=await withSchoolTransaction(schoolA,c=>c.query(
+      'SELECT count(*)::int AS n FROM offline_sync_receipts WHERE school_id=$1 AND client_mutation_id=$2',[schoolA,mutationId]));
+    expect(receiptCount.rows[0].n).toBe(1);
     await expect(withSchoolTransaction(schoolA,c=>c.query('INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,$4)',[schoolA,userId,roleB,'active']))).rejects.toThrow();
 
     const journalId = randomUUID();
@@ -82,6 +104,13 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       await expect(c.query("UPDATE journal_entries SET description='tampered' WHERE school_id=$1 AND id=$2",[schoolA,journalId])).rejects.toThrow();
       await expect(c.query('UPDATE journal_lines SET debit=200 WHERE school_id=$1 AND id=$2',[schoolA,insertedLines.rows[0].id])).rejects.toThrow();
       await expect(c.query('DELETE FROM journal_lines WHERE school_id=$1 AND id=$2',[schoolA,insertedLines.rows[1].id])).rejects.toThrow();
+
+      // Database-level posting integrity must reject an unbalanced draft even if
+      // an application handler or caller attempts to bypass domain validation.
+      const unbalancedId=randomUUID();
+      await c.query("INSERT INTO journal_entries (id,school_id,financial_year_id,period_id,entry_number,posting_date,description,status,source_type) VALUES ($1,$2,$3,$4,2,'2026-03-02','Unbalanced integration posting','draft','test')",[unbalancedId,schoolA,yearId,periodId]);
+      await c.query("INSERT INTO journal_lines (school_id,journal_entry_id,account_id,line_number,debit,credit) VALUES ($1,$2,$3,1,100.00,0),($1,$2,$4,2,0,99.00)",[schoolA,unbalancedId,cashId,incomeId]);
+      await expect(c.query("UPDATE journal_entries SET status='posted' WHERE school_id=$1 AND id=$2",[schoolA,unbalancedId])).rejects.toThrow(/equal, positive debit and credit totals/);
     });
   });
 });
