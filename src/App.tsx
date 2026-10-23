@@ -1,83 +1,186 @@
-import { useEffect, useMemo, useState } from 'react';
-import {
-  Activity, ArrowDownLeft, ArrowUpRight, BookOpen, Building2, CalendarDays,
-  CheckCircle2, ChevronDown, CircleHelp, ClipboardCheck, CloudOff, Download,
-  FileBarChart2, FileClock, FileSpreadsheet, HandCoins, LayoutDashboard, Menu,
-  MoreHorizontal, Plus, Search, Settings2, ShieldCheck, SlidersHorizontal,
-  Users, Wallet, X
-} from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { apiRequest, clearSession, downloadReport, readSession, saveSession, type SchoolSession } from './lib/api';
+import { listOfflineMutations, queueExpenseDraft, type OfflineExpenseDraft, type QueuedMutation } from './lib/offlineQueue';
+import { syncOfflineExpenses } from './lib/offlineSync';
 
-type NavItem = { label: string; icon: typeof LayoutDashboard; group: string };
-const nav: NavItem[] = [
-  { label: 'Overview', icon: LayoutDashboard, group: 'WORKSPACE' },
-  { label: 'Fee management', icon: HandCoins, group: 'FINANCE' },
-  { label: 'Expenses & vouchers', icon: Wallet, group: 'FINANCE' },
-  { label: 'Cash & bank', icon: Building2, group: 'FINANCE' },
-  { label: 'General ledger', icon: BookOpen, group: 'FINANCE' },
-  { label: 'Financial reports', icon: FileBarChart2, group: 'INSIGHTS' },
-  { label: 'Audit trail', icon: ClipboardCheck, group: 'INSIGHTS' },
-  { label: 'People & access', icon: Users, group: 'ADMINISTRATION' },
-  { label: 'School settings', icon: Settings2, group: 'ADMINISTRATION' },
-];
-const money = (n: number) => new Intl.NumberFormat('en-KE', { style: 'currency', currency: 'KES', maximumFractionDigits: 0 }).format(n);
-const sampleRows = [
-  { name: 'School fees — Term 3', ref: 'RCPT-00042', date: 'Today, 10:42 AM', category: 'Fee receipt', amount: 18500, status: 'Recorded', initials: 'SF', color: 'mint' },
-  { name: 'Electricity bill', ref: 'PV-00118', date: 'Today, 9:15 AM', category: 'Utilities', amount: -8200, status: 'Awaiting approval', initials: 'EB', color: 'amber' },
-  { name: 'School fees — Term 3', ref: 'RCPT-00041', date: 'Yesterday, 3:26 PM', category: 'Fee receipt', amount: 12000, status: 'Recorded', initials: 'SF', color: 'mint' },
-  { name: 'Learning materials', ref: 'PV-00117', date: 'Yesterday, 11:04 AM', category: 'Supplies', amount: -4650, status: 'Paid', initials: 'LM', color: 'blue' },
-];
+type Row=Record<string,unknown>;
+type Field={
+  name:string;label:string;type?:'text'|'date'|'number'|'password'|'select'|'textarea'|'email';
+  required?:boolean;placeholder?:string;options?:{label:string;value:string}[];defaultValue?:string;
+};
+const navigation=[
+  {id:'overview',label:'Overview',icon:'⌂'},
+  {id:'students',label:'Students',icon:'♙'},
+  {id:'fees',label:'Fees & receipts',icon:'KSh'},
+  {id:'expenses',label:'Expenses & approvals',icon:'↗'},
+  {id:'ledger',label:'General ledger',icon:'≋'},
+  {id:'bank',label:'Cash & bank',icon:'▤'},
+  {id:'reports',label:'Financial reports',icon:'▥'},
+  {id:'audit',label:'Audit trail',icon:'◷'},
+  {id:'users',label:'People & access',icon:'♧'},
+  {id:'settings',label:'School settings',icon:'⚙'},
+] as const;
+const labels:Record<string,string>={
+  id:'ID',admission_number:'Admission no.',full_name:'Name',class_name:'Class',status:'Status',
+  invoice_number:'Invoice',student_name:'Student',academic_year:'Academic year',issued_on:'Issued',
+  due_on:'Due date',amount:'Amount (KES)',allocated:'Allocated (KES)',outstanding:'Outstanding (KES)',
+  receipt_number:'Receipt',received_on:'Received',payment_method:'Method',expense_number:'Expense ref',
+  category:'Category',description:'Description',incurred_on:'Date',approved_at:'Approved at',
+  paid_at:'Paid at',entry_number:'Entry no.',posting_date:'Posting date',account_type:'Account type',
+  code:'Code',name:'Name',debit:'Debit',credit:'Credit',total_debit:'Debit total',total_credit:'Credit total',
+  role:'Role',email:'Email',membership_status:'Membership',action:'Action',entity_type:'Record type',
+  entity_id:'Record ID',created_at:'Created at',bank_name:'Bank',account_number_masked:'Account',
+  transaction_date:'Date',reference:'Reference',matched_at:'Matched at',starts_on:'Starts',ends_on:'Ends',
+  financial_year_name:'Financial year',period_id:'Period ID',year_starts_on:'Year starts',year_ends_on:'Year ends',
+  posted_count:'Posted journals',awaiting_approval:'Awaiting approval',approved_unpaid:'Approved unpaid',
+  collected:'Fees collected',unmatched:'Unmatched lines',paid_total:'Expenses paid',
+};
+const human=(value:unknown):string=>{
+  if(value===null||value===undefined)return '—';
+  if(typeof value==='object')return JSON.stringify(value);
+  return String(value);
+};
+const today=()=>new Date().toISOString().slice(0,10);
+function DynamicForm({title,fields,submitLabel='Save',onSubmit}:{title:string;fields:Field[];submitLabel?:string;onSubmit:(values:Record<string,string>)=>Promise<void>}){
+  const initial=useMemo(()=>Object.fromEntries(fields.map(f=>[f.name,f.defaultValue??''])),[fields]);
+  const [values,setValues]=useState<Record<string,string>>(initial);
+  const [busy,setBusy]=useState(false);
+  const [error,setError]=useState('');
+  useEffect(()=>setValues(initial),[initial]);
+  return <form className="sl-form" onSubmit={async e=>{e.preventDefault();setBusy(true);setError('');try{await onSubmit(values);setValues(initial);}catch(err){setError(err instanceof Error?err.message:'Could not save this record.');}finally{setBusy(false);}}}>
+    <h3>{title}</h3>
+    <div className="sl-form-grid">{fields.map(f=><label className={f.type==='textarea'?'sl-wide':''} key={f.name}>{f.label}
+      {f.type==='select'?<select required={f.required!==false} value={values[f.name]??''} onChange={e=>setValues(v=>({...v,[f.name]:e.target.value}))}><option value="">Select…</option>{(f.options??[]).map(o=><option key={o.value} value={o.value}>{o.label}</option>)}</select>
+      :f.type==='textarea'?<textarea required={f.required!==false} placeholder={f.placeholder} value={values[f.name]??''} onChange={e=>setValues(v=>({...v,[f.name]:e.target.value}))} rows={4}/>
+      :<input required={f.required!==false} type={f.type??'text'} min={f.type==='number'?'0':undefined} step={f.type==='number'?'0.01':undefined} placeholder={f.placeholder} value={values[f.name]??''} onChange={e=>setValues(v=>({...v,[f.name]:e.target.value}))}/>}
+    </label>)}</div>
+    {error&&<p className="sl-error">{error}</p>}<button className="sl-primary" disabled={busy}>{busy?'Saving…':submitLabel}</button>
+  </form>;
+}
+function DataTable({rows,empty='No records yet.'}:{rows:Row[];empty?:string}){
+  if(!rows.length)return <div className="sl-empty">{empty}</div>;
+  const keys=Object.keys(rows[0]).filter(k=>!['password_hash','token_hash','metadata','response_body','request_hash'].includes(k));
+  return <div className="sl-table-wrap"><table className="sl-table"><thead><tr>{keys.map(k=><th key={k}>{labels[k]??k.replaceAll('_',' ')}</th>)}</tr></thead><tbody>{rows.map((row,i)=><tr key={String(row.id??row.invoice_number??row.receipt_number??i)}>{keys.map(k=><td key={k}>{human(row[k])}</td>)}</tr>)}</tbody></table></div>;
+}
+function Login({onSuccess}:{onSuccess:(session:SchoolSession)=>void}){
+  const [schoolId,setSchoolId]=useState('');const [email,setEmail]=useState('');const [password,setPassword]=useState('');
+  const [busy,setBusy]=useState(false);const [error,setError]=useState('');
+  return <main className="sl-auth-shell"><section className="sl-auth-card">
+    <div className="sl-brand-mark">S</div><p className="sl-eyebrow">KENYAN SCHOOL FINANCE</p><h1>Welcome to ShuleLedger</h1>
+    <p className="sl-muted">Sign in to your school workspace. Each school’s records are isolated on the server.</p>
+    <form onSubmit={async e=>{e.preventDefault();setBusy(true);setError('');try{
+      const response=await fetch('/api/v1/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({schoolId,email,password})});
+      const body=await response.json();if(!response.ok)throw new Error(body.error??'Sign-in failed.');
+      const session:SchoolSession={token:body.token,expiresAt:body.expiresAt,user:body.user,school:body.school};
+      saveSession(session);onSuccess(session);
+    }catch(err){setError(err instanceof Error?err.message:'Could not sign in.');}finally{setBusy(false);}}}>
+      <label>School workspace ID<input required value={schoolId} onChange={e=>setSchoolId(e.target.value.trim())} placeholder="UUID provided by your administrator"/></label>
+      <label>Email address<input required type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@school.ac.ke"/></label>
+      <label>Password<input required type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)}/></label>
+      {error&&<p className="sl-error">{error}</p>}
+      <button className="sl-primary sl-full" disabled={busy}>{busy?'Signing in…':'Sign in securely'}</button>
+    </form>
+    <div className="sl-auth-foot"><span>🔒 Protected school workspace</span><span>Offline drafts stay pending until synced.</span></div>
+  </section></main>;
+}
+function ChangePassword({session,onChanged,onLogout}:{session:SchoolSession;onChanged:(s:SchoolSession)=>void;onLogout:()=>void}){
+  const [currentPassword,setCurrent]=useState('');const [newPassword,setNew]=useState('');const [confirm,setConfirm]=useState('');
+  const [busy,setBusy]=useState(false);const [error,setError]=useState('');
+  return <main className="sl-auth-shell"><section className="sl-auth-card"><div className="sl-brand-mark">S</div><h1>Set your password</h1>
+    <p className="sl-muted">Your administrator issued an initial password. Change it before opening school records.</p>
+    <form onSubmit={async e=>{e.preventDefault();setError('');if(newPassword!==confirm){setError('The new passwords do not match.');return;}setBusy(true);try{
+      await apiRequest('/auth/change-password',session,{method:'POST',body:JSON.stringify({currentPassword,newPassword})});
+      const me=await apiRequest<{user:SchoolSession['user'];school:SchoolSession['school'];role:string;permissions:string[]}>('/auth/me',{...session,user:{...session.user,mustChangePassword:false}});
+      const next={...session,user:me.user,school:me.school,role:me.role,permissions:me.permissions};saveSession(next);onChanged(next);
+    }catch(err){setError(err instanceof Error?err.message:'Password update failed.');}finally{setBusy(false);}}}>
+      <label>Current password<input required type="password" value={currentPassword} onChange={e=>setCurrent(e.target.value)}/></label>
+      <label>New password (12 characters minimum)<input required minLength={12} type="password" value={newPassword} onChange={e=>setNew(e.target.value)}/></label>
+      <label>Confirm new password<input required minLength={12} type="password" value={confirm} onChange={e=>setConfirm(e.target.value)}/></label>
+      {error&&<p className="sl-error">{error}</p>}<button className="sl-primary sl-full" disabled={busy}>{busy?'Updating…':'Update password'}</button>
+    </form><button className="sl-link" onClick={onLogout}>Sign out</button>
+  </section></main>;
+}
+function Workspace({session,onLogout}:{session:SchoolSession;onLogout:()=>void}){
+  const [active,setActive]=useState('overview');const [data,setData]=useState<Record<string,unknown>>({});
+  const [busy,setBusy]=useState(false);const [error,setError]=useState('');const [notice,setNotice]=useState('');
+  const [online,setOnline]=useState(navigator.onLine);const [offlineItems,setOfflineItems]=useState<QueuedMutation[]>([]);
+  const [csv,setCsv]=useState('date,description,reference,amount\n');
+  const [selectedBank,setSelectedBank]=useState('');
+  const [report,setReport]=useState<Row[]>([]);
+  const load=useCallback(async(page:string)=>{
+    setBusy(true);setError('');
+    try{
+      let next:Record<string,unknown>={};
+      if(page==='overview')next=await apiRequest('/overview',session) as Record<string,unknown>;
+      if(page==='students')next=await apiRequest('/students',session) as Record<string,unknown>;
+      if(page==='fees'){const [invoices,students]=await Promise.all([apiRequest('/fees/invoices',session),apiRequest('/students',session)]);next={...(invoices as object),...(students as object)};}
+      if(page==='expenses'){const [expenses,accounts]=await Promise.all([apiRequest('/expenses',session),apiRequest('/ledger/accounts',session)]);next={...(expenses as object),...(accounts as object)};}
+      if(page==='ledger'){const [accounts,journals,periods]=await Promise.all([apiRequest('/ledger/accounts',session),apiRequest('/ledger/journals',session),apiRequest('/accounting/periods',session)]);next={...(accounts as object),...(journals as object),...(periods as object)};}
+      if(page==='bank')next=await apiRequest('/bank/accounts',session) as Record<string,unknown>;
+      if(page==='audit')next=await apiRequest('/audit-events',session) as Record<string,unknown>;
+      if(page==='users')next=await apiRequest('/users',session) as Record<string,unknown>;
+      if(page==='settings')next=await apiRequest('/accounting/periods',session) as Record<string,unknown>;
+      setData(next);
+    }catch(err){setError(err instanceof Error?err.message:'Could not load this module.');}
+    finally{setBusy(false);}
+  },[session]);
+  const refreshOffline=useCallback(async()=>{try{setOfflineItems(await listOfflineMutations());}catch{setOfflineItems([]);}},[]);
+  useEffect(()=>{void load(active);},[active,load]);
+  useEffect(()=>{const update=()=>setOnline(navigator.onLine);window.addEventListener('online',update);window.addEventListener('offline',update);void refreshOffline();return()=>{window.removeEventListener('online',update);window.removeEventListener('offline',update);};},[refreshOffline]);
+  const rows=(key:string):Row[]=>Array.isArray(data[key])?data[key] as Row[]:[];
+  const students=rows('students');const invoices=rows('invoices');const accounts=rows('accounts');const expenses=rows('expenses');const periods=rows('periods');const banks=rows('accounts');const users=rows('users');const journals=rows('journals');const events=rows('events');
+  const accountOptions=accounts.map(a=>({label:`${human(a.code)} — ${human(a.name)} (${human(a.account_type)})`,value:String(a.id)}));
+  const studentOptions=students.map(s=>({label:`${human(s.admission_number)} — ${human(s.full_name)}`,value:String(s.id)}));
+  const invoiceOptions=invoices.map(i=>({label:`${human(i.invoice_number)} — ${human(i.student_name)} — KES ${human(i.outstanding??i.amount)}`,value:String(i.id)}));
+  const periodOptions=periods.filter(p=>p.status==='open').map(p=>({label:`${human(p.financial_year_name)} · ${human(p.starts_on)} to ${human(p.ends_on)}`,value:String(p.period_id)}));
+  const yearOptions=[...new Map(periods.filter(p=>p.status==='open').map(p=>[String(p.financial_year_id),{label:String(p.financial_year_name),value:String(p.financial_year_id)}])).values()];
+  const reportRequest=async(name:string)=>{setBusy(true);setError('');try{const r=await apiRequest<Record<string,unknown>>('/reports/'+name,session);const list=Object.entries(r).find(([k,v])=>k==='rows'&&Array.isArray(v))?.[1] as Row[]|undefined;setReport(list??[]);setNotice('Report refreshed from posted ledger data.');}catch(err){setError(err instanceof Error?err.message:'Report failed.');}finally{setBusy(false);}};
+  const send=async(path:string,method:string,body:unknown)=>{await apiRequest(path,session,{method,body:JSON.stringify(body)});setNotice('Saved successfully.');await load(active);};
+  const money=(value:unknown)=>new Intl.NumberFormat('en-KE',{style:'currency',currency:'KES',maximumFractionDigits:2}).format(Number(value??0));
+  const title=navigation.find(n=>n.id===active)?.label??'Overview';
 
-export default function App() {
-  const [active, setActive] = useState('Overview');
-  const [search, setSearch] = useState('');
-  const [showReceipt, setShowReceipt] = useState(false);
-  const [offline, setOffline] = useState(() => typeof navigator !== 'undefined' ? !navigator.onLine : false);
-  useEffect(() => {
-    const updateNetworkStatus = () => setOffline(!navigator.onLine);
-    window.addEventListener('online', updateNetworkStatus);
-    window.addEventListener('offline', updateNetworkStatus);
-    return () => {
-      window.removeEventListener('online', updateNetworkStatus);
-      window.removeEventListener('offline', updateNetworkStatus);
-    };
-  }, []);
-  const [notice, setNotice] = useState('');
-  const [mobileNav, setMobileNav] = useState(false);
-  const filteredRows = useMemo(() => sampleRows.filter(r => [r.name, r.ref, r.category].join(' ').toLowerCase().includes(search.toLowerCase())), [search]);
-
-  const selectPage = (label: string) => {
-    setActive(label);
-    setMobileNav(false);
-    if (label !== 'Overview') setNotice(label + ' module is planned for the next implementation milestones.');
-    else setNotice('');
-  };
-
-  return <div className="app-shell">
-    <aside className={`sidebar ${mobileNav ? 'sidebar-open' : ''}`}>
-      <div className="brand"><div className="brand-mark"><BookOpen size={22} strokeWidth={2.2}/></div><div><strong>shuleledger</strong><span>SCHOOL FINANCE, CLEARLY.</span></div><button className="icon-button mobile-close" onClick={() => setMobileNav(false)} aria-label="Close menu"><X size={18}/></button></div>
-      <button className="school-switch" onClick={() => setNotice('School switching will be enabled when tenant management is implemented.')}><div className="school-avatar">GK</div><div className="school-info"><strong>Greenfield Academy</strong><span>Primary & Secondary</span></div><ChevronDown size={16}/></button>
-      <div className="nav-scroll">{['WORKSPACE','FINANCE','INSIGHTS','ADMINISTRATION'].map(group => <div className="nav-group" key={group}><p>{group}</p>{nav.filter(item => item.group === group).map(item => { const Icon = item.icon; return <button key={item.label} className={`nav-item ${active === item.label ? 'nav-active' : ''}`} onClick={() => selectPage(item.label)}><Icon size={18}/><span>{item.label}</span>{item.label === 'Expenses & vouchers' && <i className="nav-dot"/>}</button>})}</div>)}</div>
-      <div className="sidebar-bottom"><div className="support-card"><div className="support-icon"><ShieldCheck size={18}/></div><strong>Books you can trust.</strong><span>Clear records. Confident decisions.</span><button onClick={() => setNotice('Help and support resources will be added with the pilot release.')}>Get support <ArrowUpRight size={14}/></button></div><div className="profile"><div className="profile-avatar">BM</div><div className="profile-info"><strong>School administrator</strong><span>Demo workspace</span></div><MoreHorizontal size={18}/></div></div>
+  return <div className="sl-shell">
+    <aside className="sl-sidebar"><div className="sl-brand"><div className="sl-brand-mark">S</div><div><b>shuleledger</b><small>SCHOOL FINANCE, CLEARLY</small></div></div>
+      <div className="sl-school"><span className="sl-school-avatar">{session.school.name.slice(0,1).toUpperCase()}</span><div><b>{session.school.name}</b><small>{session.role??'School workspace'}</small></div></div>
+      <nav className="sl-nav">{navigation.map(n=><button key={n.id} className={active===n.id?'selected':''} onClick={()=>{setActive(n.id);setReport([]);setNotice('');}}><span>{n.icon}</span>{n.label}</button>)}</nav>
+      <div className="sl-side-foot"><span className={online?'sl-online':'sl-offline'}></span>{online?'Online':'Offline'} · {offlineItems.length} local drafts</div>
     </aside>
-    {mobileNav && <button className="nav-backdrop" onClick={() => setMobileNav(false)} aria-label="Close navigation"/>}
-    <main className="main-area">
-      <header className="topbar"><div className="topbar-left"><button className="icon-button mobile-menu" onClick={() => setMobileNav(true)} aria-label="Open menu"><Menu size={20}/></button><span className="breadcrumb">Workspace</span><span className="crumb-slash">/</span><strong>{active}</strong></div><div className="topbar-actions"><div className={`sync-pill ${offline ? 'sync-offline' : ''}`}><span className="sync-dot"/>{offline ? 'Offline mode' : 'Demo workspace'}</div><button className="icon-button help-button" onClick={() => setNotice('This is a UI preview with illustrative figures. Do not use it for real financial records yet.')} aria-label="Help"><CircleHelp size={19}/></button><div className="topbar-avatar">BM</div></div></header>
-      <div className="content">
-        {notice && <div className="notice"><Activity size={17}/><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss"><X size={16}/></button></div>}
-        <div className="page-heading"><div><div className="eyebrow"><CalendarDays size={14}/> FRIDAY, 23 OCTOBER 2026 <span className="sample-tag">SAMPLE DATA</span></div><h1>{active === 'Overview' ? 'Good morning.' : active}</h1><p>{active === 'Overview' ? 'Here’s your school’s financial picture at a glance.' : 'A clear view of your school’s financial operations.'}</p></div><div className="heading-actions"><button className="btn btn-secondary" onClick={() => setNotice('Report exports will be available after the reporting module is implemented.')}><Download size={16}/> Export</button><button className="btn btn-primary" onClick={() => setShowReceipt(true)}><Plus size={17}/> Record transaction</button></div></div>
-        <div className="demo-banner"><div className="demo-icon"><ShieldCheck size={19}/></div><div><strong>Preview workspace — figures are illustrative</strong><span>This interface is an early prototype. No real school financial records are stored or posted.</span></div><button onClick={() => setNotice('Production mode will require secure sign-in, school setup, and database configuration.')} className="banner-link">What’s this? <ArrowUpRight size={14}/></button></div>
-        <section className="stats-grid">
-          <article className="stat-card"><div className="stat-top"><span>Fees collected</span><span className="stat-icon icon-green"><ArrowDownLeft size={18}/></span></div><strong>{money(1248500)}</strong><div className="stat-bottom"><span className="trend trend-up"><ArrowUpRight size={13}/> 8.2%</span><span>vs. last month</span></div><div className="sparkline spark-green"><i/><i/><i/><i/><i/><i/><i/><i/><i/><i/><i/><i/></div></article>
-          <article className="stat-card"><div className="stat-top"><span>Outstanding fees</span><span className="stat-icon icon-amber"><FileClock size={18}/></span></div><strong>{money(386400)}</strong><div className="stat-bottom"><span className="trend trend-warn">24 students</span><span>with balances due</span></div><div className="progress-track"><span style={{width:'68%'}}/></div><div className="progress-label"><span>Collection progress</span><b>68%</b></div></article>
-          <article className="stat-card"><div className="stat-top"><span>Operating expenses</span><span className="stat-icon icon-blue"><ArrowUpRight size={18}/></span></div><strong>{money(742300)}</strong><div className="stat-bottom"><span className="trend trend-neutral">Within budget</span><span>this term</span></div><div className="sparkline spark-blue"><i/><i/><i/><i/><i/><i/><i/><i/><i/><i/><i/><i/></div></article>
-          <article className="stat-card"><div className="stat-top"><span>Cash & bank</span><span className="stat-icon icon-violet"><Wallet size={18}/></span></div><strong>{money(956200)}</strong><div className="stat-bottom"><span className="trend trend-neutral"><CheckCircle2 size={13}/> Reconciled</span><span>last checked today</span></div><div className="account-mini"><span><i className="mini-dot green-dot"/> Bank</span><b>{money(812000)}</b><span><i className="mini-dot amber-dot"/> Cash</span><b>{money(144200)}</b></div></article>
-        </section>
-        <section className="insight-grid"><article className="panel collection-panel"><div className="panel-heading"><div><h2>Collection overview</h2><p>Fees collected against expected fees</p></div><button className="select-button" onClick={() => setNotice('Term selector will be connected to academic-year configuration.')}>Term 3, 2026 <ChevronDown size={15}/></button></div><div className="chart-summary"><div><span>Total collected</span><strong>{money(1248500)}</strong></div><div className="chart-legend"><span><i className="legend-green"/>Collected</span><span><i className="legend-pale"/>Outstanding</span></div></div><div className="bar-chart" aria-label="Illustrative weekly fee collection chart">{[{d:'Wk 1',v:42},{d:'Wk 2',v:66},{d:'Wk 3',v:52},{d:'Wk 4',v:79},{d:'Wk 5',v:60},{d:'Wk 6',v:88},{d:'Wk 7',v:72},{d:'Wk 8',v:94}].map(b=><div className="bar-column" key={b.d}><div className="bar-pair"><span style={{height:`${b.v}%`}}/><i style={{height:`${100-b.v}%`}}/></div><small>{b.d}</small></div>)}</div><div className="chart-foot"><span><i className="status-dot"/> Collection activity is illustrative</span><button onClick={() => selectPage('Financial reports')}>View reports <ArrowUpRight size={14}/></button></div></article>
-          <article className="panel attention-panel"><div className="panel-heading"><div><h2>Needs attention</h2><p>Items that may need your action</p></div><button className="icon-button" aria-label="More attention options" onClick={() => setNotice('Attention items will be calculated from live accounting records after backend integration.')}><MoreHorizontal size={19}/></button></div><div className="attention-list"><button className="attention-item" onClick={() => selectPage('Fee management')}><div className="attention-icon attention-amber"><Users size={18}/></div><div className="attention-copy"><strong>Outstanding school fees</strong><span>24 students have pending balances</span></div><span className="attention-count">24 <ArrowUpRight size={13}/></span></button><button className="attention-item" onClick={() => selectPage('Expenses & vouchers')}><div className="attention-icon attention-red"><ClipboardCheck size={18}/></div><div className="attention-copy"><strong>Expenses awaiting approval</strong><span>Review payment vouchers</span></div><span className="attention-count">3 <ArrowUpRight size={13}/></span></button><button className="attention-item" onClick={() => selectPage('Cash & bank')}><div className="attention-icon attention-blue"><FileSpreadsheet size={18}/></div><div className="attention-copy"><strong>Bank reconciliation</strong><span>One statement needs review</span></div><span className="attention-count">1 <ArrowUpRight size={13}/></span></button></div><button className="view-all" onClick={() => setNotice('Action center will be connected to real approvals and reconciliation exceptions.')}>View all action items <ArrowUpRight size={14}/></button></article></section>
-        <section className="panel transactions-panel"><div className="panel-heading transaction-heading"><div><h2>Recent transactions</h2><p>Latest activity across your school</p></div><div className="table-actions"><div className="search-field"><Search size={16}/><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search transactions" aria-label="Search transactions"/></div><button className="filter-button" onClick={() => setNotice('Transaction filters will be added with the connected ledger.')}><SlidersHorizontal size={15}/> Filter</button><button className="text-button" onClick={() => selectPage('General ledger')}>View ledger <ArrowUpRight size={14}/></button></div></div><div className="table-wrap"><table><thead><tr><th>TRANSACTION</th><th>REFERENCE</th><th>DATE</th><th>STATUS</th><th className="amount-cell">AMOUNT</th><th/></tr></thead><tbody>{filteredRows.map(r=><tr key={r.ref}><td><div className="transaction-name"><span className={`transaction-icon ${r.color}`}>{r.initials}</span><div><strong>{r.name}</strong><span>{r.category}</span></div></div></td><td className="ref-cell">{r.ref}</td><td className="date-cell">{r.date}</td><td><span className={`status-badge ${r.status === 'Recorded' ? 'status-success' : r.status === 'Paid' ? 'status-paid' : 'status-pending'}`}><i/>{r.status}</span></td><td className={`amount-cell amount ${r.amount > 0 ? 'positive' : 'negative'}`}>{r.amount > 0 ? '+' : '−'}{money(Math.abs(r.amount))}</td><td><button className="row-more" aria-label={`Actions for ${r.ref}`} onClick={() => setNotice(`${r.ref}: transaction detail and audit history will be available after the ledger module is connected.`)}><MoreHorizontal size={18}/></button></td></tr>)}</tbody></table>{filteredRows.length === 0 && <div className="empty-search">No matching sample transactions.</div>}</div><div className="table-footer"><span>Showing {filteredRows.length} illustrative transactions</span><button onClick={() => selectPage('General ledger')}>Open transaction register <ArrowUpRight size={14}/></button></div></section>
-        <footer className="page-footer"><span>ShuleLedger <span className="footer-separator">·</span> Designed for Kenyan schools</span><span><ShieldCheck size={14}/> Financial integrity by design <span className="footer-separator">·</span> Prototype v0.1</span></footer>
-      </div>
+    <main className="sl-main"><header className="sl-topbar"><div><small>School workspace /</small><b>{title}</b></div><div className="sl-top-actions"><span>{session.user.fullName}</span><button className="sl-outline" onClick={async()=>{try{await apiRequest('/auth/logout',session,{method:'POST'});}catch{}onLogout();}}>Sign out</button></div></header>
+      <section className="sl-content"><div className="sl-page-head"><div><p className="sl-eyebrow">SHULELEDGER · KES · AFRICA/NAIROBI</p><h1>{title}</h1><p className="sl-muted">School records are loaded from the authenticated server workspace.</p></div><button className="sl-outline" onClick={()=>void load(active)} disabled={busy}>↻ Refresh</button></div>
+        {!online&&<div className="sl-banner">Offline: financial postings are disabled. Only queued expense drafts can sync when you reconnect.</div>}
+        {notice&&<div className="sl-success">{notice}<button onClick={()=>setNotice('')}>×</button></div>}
+        {error&&<div className="sl-error-box">{error}</div>}
+        {busy&&<div className="sl-loading">Loading school records…</div>}
+        {active==='overview'&&<>{(data.summary&&typeof data.summary==='object')?<><div className="sl-stat-grid">{Object.entries((data.summary as Record<string,unknown>).fees as Record<string,unknown>).map(([k,v])=><article className="sl-stat" key={k}><span>{k==='collected'?'Fees collected':'Outstanding fees'}</span><strong>{money(v)}</strong><small>Live ledger-linked totals</small></article>)}{Object.entries((data.summary as Record<string,unknown>).expenses as Record<string,unknown>).map(([k,v])=><article className="sl-stat" key={k}><span>{labels[k]??k.replaceAll('_',' ')}</span><strong>{k.includes('total')?money(v):human(v)}</strong><small>Current school records</small></article>)}</div><div className="sl-panel"><h2>Operational checks</h2><p>Posted journals: {human((data.summary as Row).postedJournals)} · Unmatched bank statement lines: {human((data.summary as Row).unmatchedBankLines)}</p><p>Figures come from saved records; offline drafts are never included as posted transactions.</p></div></>:<div className="sl-panel">Your school dashboard will appear once the API and database are configured.</div>}
+          <div className="sl-panel"><h2>Offline drafts</h2><p>{offlineItems.length} draft expense mutation(s) saved on this device. These are not accounting entries until a server confirms them.</p>{offlineItems.length>0&&<><DataTable rows={offlineItems.map(i=>({clientMutationId:i.clientMutationId,expenseNumber:i.payload.expenseNumber,description:i.payload.description,amount:i.payload.amount,state:i.state,conflictReason:i.conflictReason}))}/><button className="sl-primary" disabled={!online||busy} onClick={async()=>{setBusy(true);setError('');try{const r=await syncOfflineExpenses(session.token);setNotice(`Sync finished: ${r.synced} accepted, ${r.conflicts} need review, ${r.pending} still pending.`);await refreshOffline();}catch(e){setError(e instanceof Error?e.message:'Sync failed.');}finally{setBusy(false);}}}>Sync draft expenses</button></>}</div>
+        </>}
+        {active==='students'&&<><DynamicForm title="Register student" fields={[{name:'admissionNumber',label:'Admission number'},{name:'fullName',label:'Full name'},{name:'className',label:'Class / grade',required:false},{name:'guardianName',label:'Guardian name',required:false},{name:'guardianPhone',label:'Guardian phone',required:false}]} onSubmit={v=>send('/students','POST',v)}/><div className="sl-panel"><h2>Students</h2><DataTable rows={students}/></div></>}
+        {active==='fees'&&<><DynamicForm title="Issue fee invoice" fields={[{name:'studentId',label:'Student',type:'select',options:studentOptions},{name:'invoiceNumber',label:'Invoice number'},{name:'academicYear',label:'Academic year',defaultValue:String(new Date().getFullYear())},{name:'description',label:'Description'},{name:'dueOn',label:'Due date',type:'date',defaultValue:today()},{name:'amount',label:'Amount (KES)',type:'number'}]} onSubmit={v=>send('/fees/invoices','POST',v)}/><DynamicForm title="Record fee receipt" fields={[{name:'studentId',label:'Student',type:'select',options:studentOptions},{name:'receiptNumber',label:'Receipt number'},{name:'invoiceId',label:'Invoice to allocate',type:'select',options:invoiceOptions},{name:'amount',label:'Amount (KES)',type:'number'},{name:'paymentMethod',label:'Payment method',type:'select',options:[{label:'Cash',value:'cash'},{label:'Bank',value:'bank'},{label:'M-Pesa',value:'mpesa'},{label:'Cheque',value:'cheque'},{label:'Other',value:'other'}]},{name:'externalReference',label:'Payment reference',required:false}]} onSubmit={v=>send('/fees/receipts','POST',{studentId:v.studentId,receiptNumber:v.receiptNumber,amount:v.amount,paymentMethod:v.paymentMethod,externalReference:v.externalReference,allocations:[{invoiceId:v.invoiceId,amount:v.amount}]})}/><div className="sl-panel"><h2>Fee invoices and balances</h2><DataTable rows={invoices}/></div></>}
+        {active==='expenses'&&<><DynamicForm title="Submit expense for approval" fields={[{name:'expenseNumber',label:'Voucher / expense number'},{name:'expenseAccountId',label:'Expense account',type:'select',options:accountOptions.filter(a=>accounts.find(x=>String(x.id)===a.value)?.account_type==='expense')},{name:'category',label:'Category'},{name:'description',label:'Description'},{name:'incurredOn',label:'Date incurred',type:'date',defaultValue:today()},{name:'amount',label:'Amount (KES)',type:'number'}]} onSubmit={v=>send('/expenses','POST',{expenseNumber:v.expenseNumber,expenseAccountId:v.expenseAccountId,category:v.category,description:v.description,incurredOn:v.incurredOn,amount:v.amount})}/><DynamicForm title="Queue expense draft while offline" fields={[{name:'expenseNumber',label:'Draft reference'},{name:'expenseAccountId',label:'Expense account',type:'select',options:accountOptions.filter(a=>accounts.find(x=>String(x.id)===a.value)?.account_type==='expense')},{name:'category',label:'Category'},{name:'description',label:'Description'},{name:'incurredOn',label:'Date incurred',type:'date',defaultValue:today()},{name:'amount',label:'Amount (KES)',type:'number'}]} onSubmit={async v=>{const draft:OfflineExpenseDraft={expenseNumber:v.expenseNumber,expenseAccountId:v.expenseAccountId,category:v.category,description:v.description,incurredOn:v.incurredOn,amount:v.amount};await queueExpenseDraft(draft);await refreshOffline();setNotice('Saved locally as a draft. Not posted and not yet visible to other users.');}}/><div className="sl-panel"><h2>Expense workflow</h2><DataTable rows={expenses}/>{expenses.filter(e=>e.status==='submitted').map(e=><button key={String(e.id)} className="sl-outline sl-action" onClick={async()=>{try{await send('/expenses/'+e.id+'/approve','POST',{});}catch(err){setError(err instanceof Error?err.message:'Approval failed.');}}}>Approve {String(e.expense_number)}</button>)}{expenses.filter(e=>e.status==='approved').map(e=><DynamicForm key={String(e.id)} title={'Pay '+String(e.expense_number)} fields={[{name:'paymentAccountId',label:'Cash / bank account',type:'select',options:accountOptions.filter(a=>accounts.find(x=>String(x.id)===a.value)?.account_type==='asset')},{name:'paidOn',label:'Payment date',type:'date',defaultValue:today()}]} onSubmit={v=>send('/expenses/'+e.id+'/pay','POST',v)}/>)}</div></>}
+        {active==='ledger'&&<><div className="sl-panel"><h2>Accounts</h2><DataTable rows={accounts}/></div><DynamicForm title="Post balanced manual journal" fields={[{name:'financialYearId',label:'Financial year',type:'select',options:yearOptions},{name:'periodId',label:'Accounting period',type:'select',options:periodOptions},{name:'postingDate',label:'Posting date',type:'date',defaultValue:today()},{name:'description',label:'Description'},{name:'debitAccountId',label:'Debit account',type:'select',options:accountOptions},{name:'creditAccountId',label:'Credit account',type:'select',options:accountOptions},{name:'amount',label:'Amount (KES)',type:'number'}]} onSubmit={async v=>{await apiRequest('/ledger/journals',session,{method:'POST',headers:{'Idempotency-Key':crypto.randomUUID()},body:JSON.stringify({financialYearId:v.financialYearId,periodId:v.periodId,postingDate:v.postingDate,description:v.description,lines:[{accountId:v.debitAccountId,debit:v.amount,credit:'0'},{accountId:v.creditAccountId,debit:'0',credit:v.amount}]})});setNotice('Journal posted successfully.');await load('ledger');}}/><div className="sl-panel"><h2>Posted journals</h2><DataTable rows={journals}/></div></>}
+        {active==='bank'&&<><DynamicForm title="Add bank / cash account" fields={[{name:'name',label:'Display name'},{name:'bankName',label:'Bank / provider'},{name:'accountNumberMasked',label:'Masked account number',required:false},{name:'ledgerAccountId',label:'Ledger asset account',type:'select',options:accountOptions.filter(a=>accounts.find(x=>String(x.id)===a.value)?.account_type==='asset')}]} onSubmit={v=>send('/bank/accounts','POST',v)}/><div className="sl-panel"><h2>Bank accounts</h2><DataTable rows={banks}/>{banks.length>0&&<label className="sl-field">Choose account<select value={selectedBank} onChange={e=>setSelectedBank(e.target.value)}><option value="">Select…</option>{banks.map(b=><option value={String(b.id)} key={String(b.id)}>{String(b.name)}</option>)}</select></label>}</div>{selectedBank&&<><div className="sl-panel"><h2>Import statement CSV</h2><p>Required columns: date, description, amount. Optional: reference. Date format: YYYY-MM-DD.</p><textarea className="sl-csv" value={csv} onChange={e=>setCsv(e.target.value)}/><button className="sl-primary" onClick={async()=>{try{const r=await apiRequest<{imported:number;duplicates:number}>('/bank/accounts/'+selectedBank+'/import',session,{method:'POST',body:JSON.stringify({csv})});setNotice(`Imported ${r.imported}; duplicates skipped ${r.duplicates}.`);}catch(e){setError(e instanceof Error?e.message:'Import failed.');}}}>Import statement</button></div><div className="sl-panel"><h2>Match statement to ledger</h2><DynamicForm title="Reconcile a line" fields={[{name:'statementLineId',label:'Statement line ID'},{name:'journalLineId',label:'Posted journal line ID'}]} onSubmit={v=>send('/bank/reconcile','POST',v)}/><p>Only exact amount matches against the configured bank ledger account are accepted.</p></div></>}</>}
+        {active==='reports'&&<><div className="sl-report-actions">{['trial-balance','income-statement','fee-balances'].map(name=><button className="sl-outline" key={name} onClick={()=>void reportRequest(name)}>{name.replaceAll('-',' ')}</button>)}{['trial-balance','income-statement','fee-balances'].map(name=><button className="sl-primary" key={'csv-'+name} onClick={async()=>{try{await downloadReport('/reports/'+name+'.csv',session);}catch(e){setError(e instanceof Error?e.message:'Export failed.');}}}>Export {name.replaceAll('-',' ')} CSV</button>)}</div><div className="sl-panel"><h2>Report results</h2><DataTable rows={report}/></div></>}
+        {active==='audit'&&<div className="sl-panel"><h2>Immutable audit events</h2><DataTable rows={events}/></div>}
+        {active==='users'&&<><DynamicForm title="Add user to this school" fields={[{name:'fullName',label:'Full name'},{name:'email',label:'Email',type:'email'},{name:'role',label:'Role',type:'select',options:[{label:'School administrator',value:'school_admin'},{label:'Bursar',value:'bursar'},{label:'Accountant',value:'accountant'},{label:'Approver',value:'approver'},{label:'Auditor',value:'auditor'}]},{name:'password',label:'Initial password (12+ characters)',type:'password'}]} onSubmit={v=>send('/users','POST',v)}/><div className="sl-panel"><h2>School members</h2><DataTable rows={users}/></div></>}
+        {active==='settings'&&<div className="sl-panel"><h2>Financial years and periods</h2><DataTable rows={periods}/><p>Periods are created during school setup. Period locking and year-end close require authorized accounting review.</p></div>}
+      </section>
     </main>
-    {showReceipt && <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) setShowReceipt(false); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><span className="eyebrow">DEMO ONLY</span><h2 id="modal-title">Record a transaction</h2><p>Financial posting is not connected in this prototype.</p></div><button className="icon-button" onClick={() => setShowReceipt(false)} aria-label="Close"><X size={18}/></button></div><div className="form-notice"><CloudOff size={17}/> This form does not save or post financial data yet.</div><label>Transaction type<select defaultValue="fee"><option value="fee">School fee receipt</option><option value="expense">Expense payment</option><option value="transfer">Account transfer</option></select></label><label>Amount (KES)<input type="number" min="0.01" step="0.01" placeholder="e.g. 12500.00"/></label><label>Description<input placeholder="Short transaction description"/></label><div className="modal-actions"><button className="btn btn-secondary" onClick={() => setShowReceipt(false)}>Cancel</button><button className="btn btn-primary" onClick={() => { setShowReceipt(false); setNotice('No transaction was saved. Live posting will be enabled only after secure API and ledger implementation.'); }}>Close preview</button></div></section></div>}
   </div>;
+}
+export default function App(){
+  const [session,setSession]=useState<SchoolSession|null>(null);const [checked,setChecked]=useState(false);
+  useEffect(()=>{
+    const cached=readSession();
+    if(!cached){setChecked(true);return;}
+    if(!navigator.onLine){setSession(cached);setChecked(true);return;}
+    apiRequest<{user:SchoolSession['user'];school:SchoolSession['school'];role:string;permissions:string[]}>('/auth/me',cached)
+      .then(me=>{const next={...cached,user:me.user,school:me.school,role:me.role,permissions:me.permissions};saveSession(next);setSession(next);})
+      .catch(()=>{clearSession();setSession(null);})
+      .finally(()=>setChecked(true));
+  },[]);
+  const logout=()=>{clearSession();setSession(null);};
+  if(!checked)return <main className="sl-auth-shell"><div className="sl-loading">Opening secure workspace…</div></main>;
+  if(!session)return <Login onSuccess={setSession}/>;
+  if(session.user.mustChangePassword)return <ChangePassword session={session} onChanged={setSession} onLogout={logout}/>;
+  return <Workspace session={session} onLogout={logout}/>;
 }
