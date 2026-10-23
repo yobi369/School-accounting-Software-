@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { PoolClient } from 'pg';
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';
 import { authContext, requireAuth, requirePermission } from './auth.js';
@@ -14,7 +15,7 @@ function amountString(minor: bigint): string {
   return sign + (absolute / 100n).toString() + '.' + (absolute % 100n).toString().padStart(2,'0');
 }
 function asMoney(value: string): string { return amountString(parseKesToMinorUnits(value)); }
-function audit(client: {query: (sql:string, values?:unknown[])=>Promise<unknown>}, schoolId:string, userId:string, action:string, type:string, id:string, metadata:Record<string,unknown>={}) {
+function audit(client: PoolClient, schoolId:string, userId:string, action:string, type:string, id:string, metadata:Record<string,unknown>={}) {
   return client.query(
     'INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id,metadata) VALUES ($1,$2,$3,$4,$5,$6::jsonb)',
     [schoolId,userId,action,type,id,JSON.stringify(metadata)],
@@ -22,7 +23,7 @@ function audit(client: {query: (sql:string, values?:unknown[])=>Promise<unknown>
 }
 
 type PostingLine = { accountId?: string; accountCode?: string; debit: string; credit: string; memo?: string };
-async function postJournal(client: any, schoolId:string, userId:string, date:string, description:string, sourceType:string, sourceId:string, postingLines:PostingLine[], reversalOfId?:string) {
+async function postJournal(client: PoolClient, schoolId:string, userId:string, date:string, description:string, sourceType:string, sourceId:string, postingLines:PostingLine[], reversalOfId?:string) {
   const period = await client.query(
     `SELECT y.id AS year_id,p.id AS period_id
      FROM financial_years y JOIN accounting_periods p
@@ -974,7 +975,7 @@ operationsRouter.get('/reports/fee-balances',requirePermission('reports.read'),w
 
 
 const reportNames=['trial-balance','income-statement','balance-sheet','general-ledger','cashbook','bankbook','receipts-register','invoice-register','fee-balances','fee-aging','expense-register','supplier-payables','bank-reconciliation','budget-variance','journal-register','collections-by-method','fees-by-class','audit-trail'];
-async function buildReportRows(c:any,schoolId:string,name:string,from:string|null,to:string|null):Promise<Record<string,unknown>[]>{
+async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:string|null,to:string|null):Promise<Record<string,unknown>[]>{
   let sql='';
   let params:unknown[]=[schoolId,from,to];
   switch(name){
