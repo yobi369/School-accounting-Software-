@@ -152,7 +152,7 @@ operationsRouter.post('/fees/invoices',requirePermission('fees.manage'),wrap(asy
 const receiptSchema=z.object({
   studentId:z.string().uuid(),receiptNumber:z.string().trim().min(1).max(60),
   receivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  amount:z.string(),paymentMethod:z.enum(['cash','bank','mpesa','cheque','other']),
+  amount:z.string(),paymentAccountId:z.string().uuid(),paymentMethod:z.enum(['cash','bank','mpesa','cheque','other']),
   externalReference:z.string().trim().max(160).optional(),
   notes:z.string().trim().max(500).optional(),
   allocations:z.array(z.object({invoiceId:z.string().uuid(),amount:z.string()})).min(1).max(100),
@@ -174,6 +174,8 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
       }
       const student=await c.query("SELECT id FROM students WHERE school_id=$1 AND id=$2 AND status='active'",[auth.schoolId,d.studentId]);
       if(!student.rowCount)throw Object.assign(new Error('Active student not found in this school.'),{statusCode:422});
+      const cashAccount=await c.query("SELECT id,account_type,is_active FROM accounts WHERE school_id=$1 AND id=$2",[auth.schoolId,d.paymentAccountId]);
+      if(!cashAccount.rowCount||cashAccount.rows[0].account_type!=='asset'||!cashAccount.rows[0].is_active)throw Object.assign(new Error('Select an active cash or bank asset account.'),{statusCode:422});
       const receiptId=randomUUID();
       await c.query(
         "INSERT INTO fee_receipts (id,school_id,receipt_number,student_id,received_on,amount,payment_method,external_reference,notes,received_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
@@ -191,9 +193,8 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
         if(allocated>outstanding)throw Object.assign(new Error('Allocation exceeds the invoice outstanding balance.'),{statusCode:422});
         await c.query('INSERT INTO fee_receipt_allocations (school_id,receipt_id,invoice_id,amount) VALUES ($1,$2,$3,$4)',[auth.schoolId,receiptId,allocation.invoiceId,amountString(allocated)]);
       }
-      const cashCode=d.paymentMethod==='cash'?'1000':'1100';
       const journal=await postJournal(c,auth.schoolId,auth.userId,receivedOn,`Fee receipt ${d.receiptNumber}`,'fee_receipt',receiptId,[
-        {accountCode:cashCode,debit:amountString(amount),credit:'0.00'},
+        {accountId:d.paymentAccountId,debit:amountString(amount),credit:'0.00'},
         {accountCode:'1200',debit:'0.00',credit:amountString(amount)},
       ]);
       await c.query('UPDATE fee_receipts SET journal_entry_id=$3 WHERE school_id=$1 AND id=$2',[auth.schoolId,receiptId,journal.id]);
