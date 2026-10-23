@@ -199,8 +199,8 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
       await c.query('UPDATE fee_receipts SET journal_entry_id=$3 WHERE school_id=$1 AND id=$2',[auth.schoolId,receiptId,journal.id]);
       await c.query(
         `UPDATE fee_invoices i SET status=CASE
-          WHEN COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)>=i.amount THEN 'paid'
-          WHEN COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)>0 THEN 'part_paid'
+          WHEN COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)+COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>=i.amount THEN 'paid'
+          WHEN COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)+COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>0 THEN 'part_paid'
           ELSE 'issued' END
          WHERE i.school_id=$1 AND i.id=ANY($2::uuid[])`,
         [auth.schoolId,d.allocations.map(a=>a.invoiceId)]);
