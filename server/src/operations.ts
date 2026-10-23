@@ -945,7 +945,7 @@ operationsRouter.get('/reports/:report.pdf',requirePermission('reports.export'),
   renderRow(keys.map(labelsForReport),true);for(const row of rows){if(doc.y>doc.page.height-45){doc.addPage();renderRow(keys.map(labelsForReport),true);}renderRow(keys.map(k=>row[k]));}
   doc.end();
 }));
-function labelsForReport(key:string):string{return labels[key]??key.replaceAll('_',' ');}
+function labelsForReport(key:string):string{return key.replaceAll('_',' ');}
 
 operationsRouter.get('/reports/:report',requirePermission('reports.read'),wrap(async(req,res)=>{
   const name=String(req.params.report);
