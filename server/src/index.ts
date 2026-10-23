@@ -142,6 +142,12 @@ const loginSchema = z.object({
 });
 app.post('/api/v1/auth/login', async (req, res, next) => {
   try {
+    const attemptKey=req.ip||'unknown';
+    const now=Date.now();
+    const prior=loginAttempts.get(attemptKey);
+    if(!prior||prior.resetAt<=now) loginAttempts.set(attemptKey,{count:1,resetAt:now+15*60*1000});
+    else if(prior.count>=15){res.status(429).json({error:'Too many sign-in attempts. Try again in 15 minutes.'});return;}
+    else prior.count+=1;
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: 'Enter a valid school ID, email, and password.' });
