@@ -18,6 +18,10 @@ Copy `.env.example` to a secure secret store, not into Git. Use a dedicated Post
 
 Use a strong, temporary `BOOTSTRAP_TOKEN` in the server secret store. Send one authorized request to `POST /api/v1/auth/bootstrap` with `x-bootstrap-token` and JSON containing `schoolName`, `schoolCode`, `fullName`, `email`, and a unique password of at least 12 characters. The response returns the school ID required at sign-in. Never put this token or a real password in shell history or logs. Remove the bootstrap token after authorized provisioning. For additional schools, rotate the provisioning secret under a documented admin process.
 
+## Deployed-service verification
+
+After the container is deployed behind HTTPS, add the exact public application origin as the GitHub Actions repository variable `PRODUCTION_BASE_URL` (for example, `https://accounting.example.org`; do not include a path). The CI workflow then runs `scripts/smoke-deployment.sh` against the real service and requires healthy liveness, database readiness, configured database status, required security headers, and `productionReady: true`. Until that variable is configured and the smoke test passes, production deployment verification is **not evidenced**. A green repository build does not verify a live host, database credentials, DNS, TLS, or provider settings.
+
 ## Security and operational checklist
 
 - [ ] Configure HTTPS and secure DNS; verify headers and origin policy.
