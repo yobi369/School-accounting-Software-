@@ -33,6 +33,10 @@ jobs:
         with:
           node-version: 22
       - run: npm install
+      - name: Audit dependency advisories
+        run: |
+          npm audit --json > /tmp/npm-audit.json || true
+          node -e "const a=require('/tmp/npm-audit.json'); for (const [name,v] of Object.entries(a.vulnerabilities||{})) console.log(name+' | severity='+v.severity+' | direct='+v.isDirect+' | range='+v.range+' | fix='+JSON.stringify(v.fixAvailable)+' | via='+v.via.map(x=>typeof x==='string'?x:x.title).join('; '))"
       - name: Create least-privilege runtime role
         run: PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger -v ON_ERROR_STOP=1 -c "CREATE ROLE shuleledger_app LOGIN PASSWORD 'shuleledger_ci' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;"
       - name: Apply database migrations
