@@ -956,7 +956,7 @@ operationsRouter.post('/budgets/:id/approve',requirePermission('periods.manage')
 }));
 
 operationsRouter.get('/reports/trial-balance',requirePermission('reports.read'),wrap(async(req,res)=>{
-  const auth=authContext(req);const from=typeof req.query.from==='string'?req.query.from:null;const to=typeof req.query.to==='string'?req.query.to:null;
+  const auth=authContext(req);const dates=reportDateFilters(req,res);if(!dates)return;
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
     `SELECT a.id,a.code,a.name,a.account_type,
       COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.debit ELSE 0 END),0)::text AS debit,
@@ -966,14 +966,14 @@ operationsRouter.get('/reports/trial-balance',requirePermission('reports.read'),
      LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
        AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
      WHERE a.school_id=$1 AND a.is_active=true
-     GROUP BY a.id ORDER BY a.code`,[auth.schoolId,from,to]));
+     GROUP BY a.id ORDER BY a.code`,[auth.schoolId,dates.from,dates.to]));
   const rows=result.rows.map(r=>({...r,debit:r.debit??'0.00',credit:r.credit??'0.00',net:r.net??'0.00'}));
-  const totals=rows.reduce((acc,r)=>({debit:acc.debit+Number(r.debit),credit:acc.credit+Number(r.credit)}),{debit:0,credit:0});
-  res.json({report:'trial-balance',currency:'KES',from,to,rows,totals:{debit:totals.debit.toFixed(2),credit:totals.credit.toFixed(2),balanced:Math.abs(totals.debit-totals.credit)<0.005}});
+  const totals=rows.reduce((acc,r)=>({debit:acc.debit+parseKesToMinorUnits(String(r.debit)),credit:acc.credit+parseKesToMinorUnits(String(r.credit))}),{debit:0n,credit:0n});
+  res.json({report:'trial-balance',currency:'KES',from:dates.from,to:dates.to,rows,totals:{debit:amountString(totals.debit),credit:amountString(totals.credit),balanced:totals.debit===totals.credit}});
 }));
 
 operationsRouter.get('/reports/income-statement',requirePermission('reports.read'),wrap(async(req,res)=>{
-  const auth=authContext(req);const from=typeof req.query.from==='string'?req.query.from:null;const to=typeof req.query.to==='string'?req.query.to:null;
+  const auth=authContext(req);const dates=reportDateFilters(req,res);if(!dates)return;
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
     `SELECT a.code,a.name,a.account_type,
       COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.credit-l.debit ELSE 0 END),0)::text AS balance
@@ -981,11 +981,11 @@ operationsRouter.get('/reports/income-statement',requirePermission('reports.read
      LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
        AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
      WHERE a.school_id=$1 AND a.account_type IN ('income','expense')
-     GROUP BY a.id ORDER BY a.account_type,a.code`,[auth.schoolId,from,to]));
-  const rows=result.rows.map(r=>({...r,balance:r.account_type==='expense'?(-Number(r.balance)).toFixed(2):Number(r.balance).toFixed(2)}));
-  const income=rows.filter(r=>r.account_type==='income').reduce((s,r)=>s+Number(r.balance),0);
-  const expenses=rows.filter(r=>r.account_type==='expense').reduce((s,r)=>s+Number(r.balance),0);
-  res.json({report:'income-statement',currency:'KES',from,to,rows,totals:{income:income.toFixed(2),expenses:expenses.toFixed(2),surplus:(income-expenses).toFixed(2)}});
+     GROUP BY a.id ORDER BY a.account_type,a.code`,[auth.schoolId,dates.from,dates.to]));
+  const signedMinor=(value:unknown):bigint=>{const raw=String(value??'0.00');const negative=raw.startsWith('-');const parsed=parseKesToMinorUnits(negative?raw.slice(1):raw);return negative?-parsed:parsed;};
+  const rows=result.rows.map(r=>({...r,balance:amountString(r.account_type==='expense'?-signedMinor(r.balance):signedMinor(r.balance))}));
+  const totals=rows.reduce((acc,r)=>{const amount=signedMinor(r.balance);if(r.account_type==='income')acc.income+=amount;else acc.expenses+=amount;return acc;},{income:0n,expenses:0n});
+  res.json({report:'income-statement',currency:'KES',from:dates.from,to:dates.to,rows,totals:{income:amountString(totals.income),expenses:amountString(totals.expenses),surplus:amountString(totals.income-totals.expenses)}});
 }));
 
 operationsRouter.get('/reports/fee-balances',requirePermission('reports.read'),wrap(async(req,res)=>{
