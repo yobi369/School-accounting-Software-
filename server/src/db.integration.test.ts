@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { pool, withSchoolTransaction } from './db.js';
+import { authenticateRequest, createSession } from './auth.js';
 
 const enabled = Boolean(process.env.DATABASE_URL);
 describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
@@ -48,6 +49,26 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
     expect(ownRows.rows.map((row: {id:string})=>row.id)).not.toContain(studentB);
     const workspaces=await withSchoolTransaction(schoolA,async c=>{await c.query("SELECT set_config('app.user_id',$1,true)",[userId]);return c.query('SELECT sc.id,sc.name FROM school_memberships m JOIN schools sc ON sc.id=m.school_id WHERE m.user_id=$1 AND m.status=\'active\' ORDER BY sc.name',[userId]);});
     expect(workspaces.rows.map((row: {id:string})=>row.id).sort()).toEqual([schoolA,schoolB].sort());
+
+    // Exercise the real session lookup against the least-privilege PostgreSQL role.
+    await withSchoolTransaction(schoolA, async c => {
+      await c.query("INSERT INTO permissions (code,description) VALUES ('reports.read','Read reports') ON CONFLICT (code) DO NOTHING");
+      await c.query("INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,'reports.read') ON CONFLICT DO NOTHING",[roleA]);
+    });
+    const session = await createSession(userId,schoolA);
+    const request = { header: (name:string) => name.toLowerCase()==='authorization' ? 'Bearer '+session.token : undefined } as import('express').Request;
+    const authenticated = await authenticateRequest(request);
+    expect(authenticated?.userId).toBe(userId);
+    expect(authenticated?.schoolId).toBe(schoolA);
+    expect(authenticated?.role).toBe('auditor');
+    expect(authenticated?.permissions).toContain('reports.read');
+
+    // A valid token must stop working immediately when the membership is revoked.
+    await withSchoolTransaction(schoolA,c=>c.query(
+      "UPDATE school_memberships SET status='revoked' WHERE school_id=$1 AND user_id=$2",[schoolA,userId]));
+    expect(await authenticateRequest(request)).toBeNull();
+    await withSchoolTransaction(schoolA,c=>c.query(
+      "UPDATE school_memberships SET status='active' WHERE school_id=$1 AND user_id=$2",[schoolA,userId]));
     await expect(withSchoolTransaction(schoolA,c=>c.query('INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,$4)',[schoolA,userId,roleB,'active']))).rejects.toThrow();
 
     const journalId = randomUUID();
