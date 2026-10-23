@@ -673,6 +673,51 @@ operationsRouter.post('/accounting/years/:id/close',requirePermission('periods.m
 
 function todayIso(){return new Date().toISOString().slice(0,10);}
 
+
+operationsRouter.get('/budgets',requirePermission('reports.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);
+  const yearId=typeof req.query.financialYearId==='string'?req.query.financialYearId:null;
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    `SELECT b.id,b.name,b.financial_year_id,y.name AS financial_year_name,b.account_id,a.code,a.name AS account_name,
+      b.budget_amount::text,b.status,b.approved_at,
+      COALESCE((SELECT sum(l.debit-l.credit) FROM journal_lines l JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id WHERE l.school_id=b.school_id AND l.account_id=b.account_id AND j.financial_year_id=b.financial_year_id AND j.status='posted'),0)::text AS actual
+     FROM budgets b JOIN financial_years y ON y.id=b.financial_year_id AND y.school_id=b.school_id
+     JOIN accounts a ON a.id=b.account_id AND a.school_id=b.school_id
+     WHERE b.school_id=$1 AND ($2::uuid IS NULL OR b.financial_year_id=$2)
+     ORDER BY y.starts_on DESC,a.code,b.name`,[auth.schoolId,yearId]));
+  res.json({budgets:result.rows});
+}));
+operationsRouter.post('/budgets',requirePermission('periods.manage'),wrap(async(req,res)=>{
+  const p=z.object({financialYearId:z.string().uuid(),accountId:z.string().uuid(),name:z.string().trim().min(2).max(120),budgetAmount:z.string()}).safeParse(req.body);
+  if(!p.success){res.status(400).json({error:'Invalid budget details.',details:p.error.flatten()});return;}
+  const auth=authContext(req);const d=p.data;const amount=parseKesToMinorUnits(d.budgetAmount);
+  try{
+    const budget=await withSchoolTransaction(auth.schoolId,async c=>{
+      const year=await c.query("SELECT id FROM financial_years WHERE school_id=$1 AND id=$2 AND status='open'",[auth.schoolId,d.financialYearId]);
+      const account=await c.query("SELECT id,account_type FROM accounts WHERE school_id=$1 AND id=$2 AND is_active=true",[auth.schoolId,d.accountId]);
+      if(!year.rowCount||!account.rowCount||account.rows[0].account_type!=='expense')throw Object.assign(new Error('Select an open financial year and active expense account.'),{statusCode:422});
+      const r=await c.query('INSERT INTO budgets (school_id,financial_year_id,account_id,name,budget_amount) VALUES ($1,$2,$3,$4,$5) RETURNING id,name,financial_year_id,account_id,budget_amount::text,status',[auth.schoolId,d.financialYearId,d.accountId,d.name,amountString(amount)]);
+      await audit(c,auth.schoolId,auth.userId,'budget.create','budget',r.rows[0].id);
+      return r.rows[0];
+    });
+    res.status(201).json({budget});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+operationsRouter.post('/budgets/:id/approve',requirePermission('periods.manage'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid budget ID.'});return;}
+  const auth=authContext(req);
+  try{
+    const budget=await withSchoolTransaction(auth.schoolId,async c=>{
+      const r=await c.query("SELECT id,status FROM budgets WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
+      if(!r.rowCount||r.rows[0].status!=='draft')throw Object.assign(new Error('Only a draft budget can be approved.'),{statusCode:409});
+      await c.query("UPDATE budgets SET status='approved',approved_by=$3,approved_at=now() WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data,auth.userId]);
+      await audit(c,auth.schoolId,auth.userId,'budget.approve','budget',id.data);
+      return {id:id.data,status:'approved'};
+    });
+    res.json({budget});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
 operationsRouter.get('/reports/trial-balance',requirePermission('reports.read'),wrap(async(req,res)=>{
   const auth=authContext(req);const from=typeof req.query.from==='string'?req.query.from:null;const to=typeof req.query.to==='string'?req.query.to:null;
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
