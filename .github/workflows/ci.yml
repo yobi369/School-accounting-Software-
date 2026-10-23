@@ -32,12 +32,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm install
       - name: Create least-privilege runtime role
         run: PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger -v ON_ERROR_STOP=1 -c "CREATE ROLE shuleledger_app LOGIN PASSWORD 'shuleledger_ci' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;"
       - name: Apply database migrations
         run: npm run db:migrate
+      - name: Verify database backup and restore
+        run: |
+          pg_dump --format=custom --no-owner --no-acl --dbname "$MIGRATIONS_DATABASE_URL" --file=/tmp/shuleledger-ci.dump
+          PGPASSWORD=postgres createdb -h localhost -U postgres shuleledger_restore
+          pg_restore --exit-on-error --no-owner --no-acl --dbname=postgres://postgres:postgres@localhost:5432/shuleledger_restore /tmp/shuleledger-ci.dump
+          test "$(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -Atc 'SELECT count(*) FROM schema_migrations')" -ge 8
+          test "$(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -Atc 'SELECT count(*) FROM journal_entries')" -ge 0
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
