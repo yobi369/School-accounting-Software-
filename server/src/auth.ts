@@ -15,6 +15,7 @@ export type AuthContext = {
   role: string;
   permissions: string[];
   sessionId: string;
+  mustChangePassword: boolean;
 };
 declare global {
   namespace Express {
@@ -60,7 +61,7 @@ export async function authenticateRequest(req: Request): Promise<AuthContext | n
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(schoolId)) return null;
   return withSchoolTransaction(schoolId, async client => {
     const result = await client.query(
-      `SELECT s.id AS session_id, u.id AS user_id, u.email, u.full_name,
+      `SELECT s.id AS session_id, u.id AS user_id, u.email, u.full_name, u.must_change_password,
               sc.name AS school_name, r.name AS role_name
        FROM auth_sessions s
        JOIN users u ON u.id = s.user_id AND u.status = 'active'
@@ -73,7 +74,7 @@ export async function authenticateRequest(req: Request): Promise<AuthContext | n
       [schoolId, hashToken(token)],
     );
     if (result.rowCount !== 1) return null;
-    const row = result.rows[0] as { session_id: string; user_id: string; email: string; full_name: string; school_name: string; role_name: string };
+    const row = result.rows[0] as { session_id: string; user_id: string; email: string; full_name: string; must_change_password:boolean; school_name: string; role_name: string };
     const permissions = await client.query(
       `SELECT rp.permission_code FROM school_memberships m
        JOIN role_permissions rp ON rp.role_id = m.role_id
@@ -85,7 +86,7 @@ export async function authenticateRequest(req: Request): Promise<AuthContext | n
     return {
       sessionId: row.session_id, userId: row.user_id, schoolId, email: row.email,
       fullName: row.full_name, schoolName: row.school_name, role: row.role_name,
-      permissions: permissions.rows.map(item => String(item.permission_code)),
+      mustChangePassword: row.must_change_password, permissions: permissions.rows.map(item => String(item.permission_code)),
     };
   });
 }
@@ -112,6 +113,10 @@ export function requirePermission(permission: string) {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.auth) {
       res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    if (req.auth.mustChangePassword) {
+      res.status(403).json({ error: 'Change your initial password before using this feature.', code: 'PASSWORD_CHANGE_REQUIRED' });
       return;
     }
     if (!req.auth.permissions.includes(permission)) {
