@@ -491,6 +491,154 @@ operationsRouter.post('/users',requirePermission('users.manage'),wrap(async(req,
   }catch(error){if(!handleError(res,error))throw error;}
 }));
 
+
+operationsRouter.get('/suppliers',requirePermission('expenses.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);const r=await withSchoolTransaction(auth.schoolId,c=>c.query('SELECT id,name,phone,email,tax_pin,status FROM suppliers WHERE school_id=$1 ORDER BY name',[auth.schoolId]));res.json({suppliers:r.rows});
+}));
+operationsRouter.post('/suppliers',requirePermission('expenses.create'),wrap(async(req,res)=>{
+  const p=z.object({name:z.string().trim().min(2).max(160),phone:z.string().trim().max(40).optional(),email:z.string().trim().email().max(254).optional(),taxPin:z.string().trim().max(40).optional()}).safeParse(req.body);
+  if(!p.success){res.status(400).json({error:'Invalid supplier details.',details:p.error.flatten()});return;}
+  const auth=authContext(req);const d=p.data;
+  const supplier=await withSchoolTransaction(auth.schoolId,async c=>{const r=await c.query('INSERT INTO suppliers (school_id,name,phone,email,tax_pin) VALUES ($1,$2,$3,$4,$5) RETURNING id,name,phone,email,tax_pin,status',[auth.schoolId,d.name,d.phone??null,d.email??null,d.taxPin??null]);await audit(c,auth.schoolId,auth.userId,'supplier.create','supplier',r.rows[0].id);return r.rows[0];});
+  res.status(201).json({supplier});
+}));
+
+const waiverSchema=z.object({invoiceId:z.string().uuid(),waiverNumber:z.string().trim().min(1).max(60),amount:z.string(),reason:z.string().trim().min(3).max(500),waivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()});
+operationsRouter.get('/fees/waivers',requirePermission('fees.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);const r=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    'SELECT w.id,w.waiver_number,w.invoice_id,i.invoice_number,w.amount::text,w.reason,w.waived_on,w.status,w.journal_entry_id FROM fee_waivers w JOIN fee_invoices i ON i.id=w.invoice_id AND i.school_id=w.school_id WHERE w.school_id=$1 ORDER BY w.created_at DESC LIMIT 500',[auth.schoolId]));
+  res.json({waivers:r.rows});
+}));
+operationsRouter.post('/fees/waivers',requirePermission('fees.manage'),wrap(async(req,res)=>{
+  const p=waiverSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Invalid fee waiver details.',details:p.error.flatten()});return;}
+  const auth=authContext(req);const d=p.data;const amount=parseKesToMinorUnits(d.amount);const waivedOn=d.waivedOn??todayIso();
+  if(amount<=0n){res.status(422).json({error:'Waiver amount must be positive.'});return;}
+  try{
+    const waiver=await withSchoolTransaction(auth.schoolId,async c=>{
+      const inv=await c.query('SELECT id,amount::text,status FROM fee_invoices WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,d.invoiceId]);
+      if(!inv.rowCount||inv.rows[0].status==='void')throw Object.assign(new Error('Invoice was not found or has been voided.'),{statusCode:422});
+      const settled=await c.query(
+        `SELECT COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=$2 AND r.status='posted'),0)::text AS allocated,
+         COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived`,[auth.schoolId,d.invoiceId]);
+      const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(settled.rows[0].allocated))-parseKesToMinorUnits(String(settled.rows[0].waived));
+      if(amount>outstanding)throw Object.assign(new Error('Waiver exceeds the invoice outstanding balance.'),{statusCode:422});
+      const id=randomUUID();
+      await c.query('INSERT INTO fee_waivers (id,school_id,waiver_number,invoice_id,amount,reason,waived_on,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',[id,auth.schoolId,d.waiverNumber,d.invoiceId,amountString(amount),d.reason,waivedOn,auth.userId]);
+      const journal=await postJournal(c,auth.schoolId,auth.userId,waivedOn,`Fee waiver ${d.waiverNumber}`,'fee_waiver',id,[
+        {accountCode:'4200',debit:amountString(amount),credit:'0.00'},
+        {accountCode:'1200',debit:'0.00',credit:amountString(amount)},
+      ]);
+      await c.query('UPDATE fee_waivers SET journal_entry_id=$3 WHERE school_id=$1 AND id=$2',[auth.schoolId,id,journal.id]);
+      const totalSettled=amount+parseKesToMinorUnits(String(settled.rows[0].allocated))+parseKesToMinorUnits(String(settled.rows[0].waived));
+      await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric >= amount THEN 'paid' WHEN $4::numeric > 0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,d.invoiceId,amountString(totalSettled),String(settled.rows[0].allocated)]);
+      await audit(c,auth.schoolId,auth.userId,'fee.waiver.post','fee_waiver',id,{invoiceId:d.invoiceId,journalEntryId:journal.id,amount:amountString(amount),reason:d.reason});
+      return {id,waiverNumber:d.waiverNumber,invoiceId:d.invoiceId,amount:amountString(amount),reason:d.reason,status:'posted',journalEntryId:journal.id};
+    });
+    res.status(201).json({waiver});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
+operationsRouter.post('/ledger/journals/:id/reverse',requirePermission('ledger.post'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);
+  const p=z.object({reason:z.string().trim().min(3).max(500),reversalDate:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()}).safeParse(req.body);
+  if(!id.success||!p.success){res.status(400).json({error:'Provide a journal ID and a reversal reason.'});return;}
+  const auth=authContext(req);const reversalDate=p.data.reversalDate??todayIso();
+  try{
+    const result=await withSchoolTransaction(auth.schoolId,async c=>{
+      const original=await c.query('SELECT * FROM journal_entries WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,id.data]);
+      if(!original.rowCount||original.rows[0].status!=='posted')throw Object.assign(new Error('Only a posted journal in this school can be reversed.'),{statusCode:422});
+      const already=await c.query('SELECT id FROM journal_entries WHERE school_id=$1 AND reversal_of_id=$2',[auth.schoolId,id.data]);
+      if(already.rowCount)throw Object.assign(new Error('This journal has already been reversed.'),{statusCode:409});
+      const source=String(original.rows[0].source_type);const sourceId=original.rows[0].source_id?String(original.rows[0].source_id):null;
+      if(source==='fee_invoice'&&sourceId){
+        const settled=await c.query(
+          `SELECT (SELECT count(*) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=$2 AND r.status='posted') AS receipts,
+           (SELECT count(*) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted') AS waivers`,[auth.schoolId,sourceId]);
+        if(Number(settled.rows[0].receipts)>0||Number(settled.rows[0].waivers)>0)throw Object.assign(new Error('Reverse posted receipts and waivers before voiding this invoice.'),{statusCode:409});
+      }
+      if(source==='expense_approval'&&sourceId){
+        const exp=await c.query('SELECT status FROM expenses WHERE school_id=$1 AND id=$2',[auth.schoolId,sourceId]);
+        if(exp.rowCount&&exp.rows[0].status==='paid')throw Object.assign(new Error('Reverse the expense payment journal before reversing its approval journal.'),{statusCode:409});
+      }
+      const originalLines=await c.query('SELECT account_id,debit::text,credit::text,memo FROM journal_lines WHERE school_id=$1 AND journal_entry_id=$2 ORDER BY line_number',[auth.schoolId,id.data]);
+      const lines=originalLines.rows.map(l=>({accountId:String(l.account_id),debit:String(l.credit),credit:String(l.debit),memo:l.memo?String(l.memo):undefined}));
+      const journal=await postJournal(c,auth.schoolId,auth.userId,reversalDate,`Reversal of ${original.rows[0].entry_number}: ${p.data.reason}`,'reversal',id.data,lines,id.data);
+      if(source==='fee_invoice'&&sourceId)await c.query("UPDATE fee_invoices SET status='void' WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
+      if(source==='fee_receipt'&&sourceId){
+        await c.query("UPDATE fee_receipts SET status='reversed' WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
+        const invoices=await c.query('SELECT DISTINCT invoice_id FROM fee_receipt_allocations WHERE school_id=$1 AND receipt_id=$2',[auth.schoolId,sourceId]);
+        for(const row of invoices.rows){
+          const settlement=await c.query(
+            `SELECT i.amount::text,
+             COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
+             COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=i.id AND status='posted'),0)::text AS waived
+             FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2`,[auth.schoolId,row.invoice_id]);
+          if(settlement.rowCount){
+            const total=parseKesToMinorUnits(String(settlement.rows[0].allocated))+parseKesToMinorUnits(String(settlement.rows[0].waived));
+            const amount=parseKesToMinorUnits(String(settlement.rows[0].amount));
+            await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,row.invoice_id,amountString(total),String(settlement.rows[0].allocated)]);
+          }
+        }
+      }
+      if(source==='fee_waiver'&&sourceId){
+        await c.query("UPDATE fee_waivers SET status='reversed' WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
+        const w=await c.query('SELECT invoice_id FROM fee_waivers WHERE school_id=$1 AND id=$2',[auth.schoolId,sourceId]);
+        if(w.rowCount){
+          const t=await c.query(
+            `SELECT i.amount::text,
+             COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
+             COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=i.id AND status='posted'),0)::text AS waived
+             FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2`,[auth.schoolId,w.rows[0].invoice_id]);
+          if(t.rowCount){const total=parseKesToMinorUnits(String(t.rows[0].allocated))+parseKesToMinorUnits(String(t.rows[0].waived));await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,w.rows[0].invoice_id,amountString(total),String(t.rows[0].allocated)]);}
+        }
+      }
+      if(source==='expense_payment'&&sourceId)await c.query("UPDATE expenses SET status='approved',paid_at=NULL,payment_journal_entry_id=NULL WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
+      if(source==='expense_approval'&&sourceId)await c.query("UPDATE expenses SET status='rejected' WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
+      await audit(c,auth.schoolId,auth.userId,'ledger.journal.reverse','journal_entry',journal.id,{reversalOf:id.data,reason:p.data.reason});
+      return {id:journal.id,entryNumber:journal.entryNumber,reversalOf:id.data,status:'posted',reason:p.data.reason};
+    });
+    res.status(201).json({reversal:result});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
+operationsRouter.post('/accounting/periods/:id/lock',requirePermission('periods.manage'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid accounting period ID.'});return;}
+  const auth=authContext(req);
+  try{
+    const period=await withSchoolTransaction(auth.schoolId,async c=>{
+      const r=await c.query("SELECT id,status FROM accounting_periods WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
+      if(!r.rowCount)throw Object.assign(new Error('Accounting period not found.'),{statusCode:404});
+      if(r.rows[0].status==='locked')return {id:id.data,status:'locked'};
+      const drafts=await c.query("SELECT count(*)::int AS n FROM journal_entries WHERE school_id=$1 AND period_id=$2 AND status='draft'",[auth.schoolId,id.data]);
+      if(drafts.rows[0].n>0)throw Object.assign(new Error('Post or discard all draft journals before locking this period.'),{statusCode:409});
+      await c.query("UPDATE accounting_periods SET status='locked' WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data]);
+      await audit(c,auth.schoolId,auth.userId,'accounting.period.lock','accounting_period',id.data);
+      return {id:id.data,status:'locked'};
+    });
+    res.json({period});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+operationsRouter.post('/accounting/years/:id/close',requirePermission('periods.manage'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid financial year ID.'});return;}
+  const auth=authContext(req);
+  try{
+    const year=await withSchoolTransaction(auth.schoolId,async c=>{
+      const r=await c.query("SELECT id,status FROM financial_years WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
+      if(!r.rowCount)throw Object.assign(new Error('Financial year not found.'),{statusCode:404});
+      if(r.rows[0].status==='closed')return {id:id.data,status:'closed'};
+      const periods=await c.query("SELECT count(*)::int AS total,count(*) FILTER (WHERE status='locked')::int AS locked FROM accounting_periods WHERE school_id=$1 AND financial_year_id=$2",[auth.schoolId,id.data]);
+      const drafts=await c.query("SELECT count(*)::int AS n FROM journal_entries WHERE school_id=$1 AND financial_year_id=$2 AND status='draft'",[auth.schoolId,id.data]);
+      if(!periods.rows[0].total||periods.rows[0].total!==periods.rows[0].locked||drafts.rows[0].n>0)throw Object.assign(new Error('Lock every accounting period and resolve all drafts before year-end close.'),{statusCode:409});
+      await c.query("UPDATE financial_years SET status='closed' WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data]);
+      await audit(c,auth.schoolId,auth.userId,'accounting.year.close','financial_year',id.data);
+      return {id:id.data,status:'closed'};
+    });
+    res.json({financialYear:year});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
+function todayIso(){return new Date().toISOString().slice(0,10);}
+
 operationsRouter.get('/reports/trial-balance',requirePermission('reports.read'),wrap(async(req,res)=>{
   const auth=authContext(req);const from=typeof req.query.from==='string'?req.query.from:null;const to=typeof req.query.to==='string'?req.query.to:null;
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
