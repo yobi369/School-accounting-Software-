@@ -120,7 +120,7 @@ function Workspace({session,onLogout}:{session:SchoolSession;onLogout:()=>void})
       if(page==='bank'){const [bankAccounts,ledgerAccounts]=await Promise.all([apiRequest('/bank/accounts',session),apiRequest('/ledger/accounts',session)]);next={...(bankAccounts as object),ledgerAccounts:(ledgerAccounts as Record<string,unknown>).accounts};}
       if(page==='audit')next=await apiRequest('/audit-events',session) as Record<string,unknown>;
       if(page==='users')next=await apiRequest('/users',session) as Record<string,unknown>;
-      if(page==='settings'){const [periodData,budgetData]=await Promise.all([apiRequest('/accounting/periods',session),apiRequest('/budgets',session)]);next={...(periodData as object),...(budgetData as object)};}
+      if(page==='settings'){const [periodData,budgetData,accountData]=await Promise.all([apiRequest('/accounting/periods',session),apiRequest('/budgets',session),apiRequest('/ledger/accounts',session)]);next={...(periodData as object),...(budgetData as object),...(accountData as object)};}
       setData(next);
       const cachedAccounts=Array.isArray(next.ledgerAccounts)?next.ledgerAccounts:next.accounts;
       if(Array.isArray(cachedAccounts))sessionStorage.setItem('shuleledger.accounts.'+session.school.id,JSON.stringify(cachedAccounts));
