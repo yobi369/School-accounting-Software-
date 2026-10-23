@@ -80,7 +80,7 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
         [userId, email, passwordHash, input.fullName.trim()],
       );
       const permissionCodes = [
-        'school.manage','users.manage','bank.manage','students.read','students.manage','fees.read','fees.manage',
+        'school.manage','users.manage','bank.manage','students.read','students.create','students.manage','fees.read','fees.manage',
         'receipts.create','ledger.read','ledger.post','expenses.read','expenses.create',
         'expenses.approve','expenses.pay','bank.read','bank.reconcile','reports.read','reports.export',
         'periods.manage','audit.read',
