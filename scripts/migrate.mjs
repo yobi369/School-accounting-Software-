@@ -8,7 +8,7 @@ if (!connectionString) {
   process.stderr.write('Set MIGRATIONS_DATABASE_URL or DATABASE_URL before running migrations.\n');
   process.exit(1);
 }
-const pool = new pg.Pool({ connectionString, max: 1 });
+const pool = new pg.Pool({ connectionString, max: 1, ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: true } : undefined });
 try {
   await pool.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
     name text PRIMARY KEY,
