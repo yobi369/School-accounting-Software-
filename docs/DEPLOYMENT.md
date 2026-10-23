@@ -12,7 +12,7 @@ Copy `.env.example` to a secure secret store, not into Git. Use a dedicated Post
 2. Configure `MIGRATIONS_DATABASE_URL` with the migration owner and `DATABASE_URL` with the runtime role.
 3. Run `npm run db:migrate` once as a release step before rolling out the new application version. The runner records checksums and refuses to silently change an applied migration.
 4. Build and run the container. It serves the static workspace and API from one origin; this is required for the current relative API URLs and CSP.
-5. Configure TLS at the ingress, an external rate limit/WAF, health monitoring, log redaction, database backups, and alerting. The in-process login throttle is only a secondary control, not a replacement for an edge rate limit.
+5. Configure TLS at the ingress, an external rate limit/WAF, health monitoring, log redaction, database backups, and alerting. The in-process login throttle is only a secondary control, not a replacement for an edge rate limit. Keep `PRODUCTION_READINESS_ATTESTED=false` until the live HTTPS deployment, two-school authorization tests, encrypted provider backup/restore drill, and accountant acceptance checklist have passed. Only then set it to `true`; this is an explicit operator attestation and is checked by the production smoke test.
 
 ## Provision the first school
 

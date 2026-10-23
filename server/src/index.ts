@@ -39,10 +39,13 @@ app.get('/ready',async(_req,res)=>{
 });
 
 app.get('/api/v1/status', (_req, res) => {
+  // This is an explicit operator attestation, not an automatic consequence of
+  // passing CI. Set it only after the production checklist and restore drill.
+  const productionReady = process.env.PRODUCTION_READINESS_ATTESTED === 'true' && Boolean(pool);
   res.status(200).json({
     name: 'ShuleLedger API',
-    readiness: 'development',
-    productionReady: false,
+    readiness: productionReady ? 'production-attested' : 'development',
+    productionReady,
     databaseConfigured: Boolean(pool),
     enabled: ['health-and-readiness-checks', 'exact-decimal-validation', 'database-authentication', 'tenant-context', 'role-permissions', 'fee-invoices-and-receipts', 'receipt-allocation', 'fee-waivers', 'expense-approval-and-payment', 'double-entry-journals', 'period-controls', 'budgets', 'bank-statement-import-and-reconciliation', '18-financial-reports', 'csv-xlsx-pdf-exports', 'offline-expense-drafts'],
     limitedOrOperationallyUnverified: ['offline-sync-is-limited-to-expense-drafts', 'production-provider-backup-and-restore', 'external-penetration-testing', 'production-hosting-configuration', 'mpesa-and-kra-etims-integrations', 'multi-factor-authentication', 'sms-and-email-delivery'],
