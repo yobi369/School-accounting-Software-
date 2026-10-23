@@ -113,7 +113,7 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
       const accounts = [
         ['1000','Cash on hand','asset'],['1100','Bank account','asset'],['1200','Fees receivable','asset'],
         ['2000','Accounts payable','liability'],['3000','Opening fund balance','equity'],
-        ['4000','School fee income','income'],['4100','Other income','income'],
+        ['4000','School fee income','income'],['4100','Other income','income'],['4200','Fee waivers (contra-income)','income'],
         ['5000','Teaching and learning expenses','expense'],['5100','Administration expenses','expense'],
       ];
       for (const [code,name,type] of accounts) {
