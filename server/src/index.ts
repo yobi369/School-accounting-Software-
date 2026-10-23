@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { authContext, createSession, hashPassword, requireAuth, requirePermission, safeSecretEquals, verifyPassword } from './auth.js';
+import { authContext, createSession, hashPassword, hashToken, requireAuth, requirePermission, safeSecretEquals, verifyPassword } from './auth.js';
 import { pool, requirePool, withSchoolTransaction } from './db.js';
 import { operationsRouter } from './operations.js';
 import { formatMinorUnitsKes, parseKesToMinorUnits, validateJournal } from './domain/ledger.js';
@@ -204,6 +204,42 @@ app.post('/api/v1/auth/login', async (req, res, next) => {
 });
 
 
+
+
+app.post('/api/v1/auth/accept-invitation',requireAuth,async(req,res,next)=>{
+  try{
+    const p=z.object({token:z.string().min(60).max(200)}).safeParse(req.body);
+    if(!p.success){res.status(400).json({error:'Provide a valid school invitation token.'});return;}
+    const auth=authContext(req);const parts=p.data.token.split('.');
+    if(parts.length!==2||! /^[0-9a-f-]{36}$/i.test(parts[0])||parts[1].length<32){res.status(400).json({error:'Invitation token format is invalid.'});return;}
+    const targetSchoolId=parts[0];const tokenHash=hashToken(p.data.token);
+    const membership=await withSchoolTransaction(targetSchoolId,async client=>{
+      const result=await client.query(
+        `SELECT i.id,i.email,i.role_id,i.expires_at,i.accepted_at,i.revoked_at,sc.name AS school_name,r.name AS role_name
+         FROM school_invitations i JOIN schools sc ON sc.id=i.school_id
+         JOIN roles r ON r.id=i.role_id AND r.school_id=i.school_id
+         WHERE i.school_id=$1 AND i.token_hash=$2 FOR UPDATE OF i`,[targetSchoolId,tokenHash]);
+      if(!result.rowCount)throw Object.assign(new Error('Invitation token is invalid.'),{statusCode:404});
+      const invite=result.rows[0];
+      if(String(invite.email).toLowerCase()!==auth.email.toLowerCase())throw Object.assign(new Error('Sign in with the email address this invitation was issued to.'),{statusCode:403});
+      if(invite.accepted_at||invite.revoked_at)throw Object.assign(new Error('This invitation has already been used or revoked.'),{statusCode:409});
+      if(new Date(invite.expires_at).getTime()<=Date.now())throw Object.assign(new Error('This invitation has expired. Ask the school administrator to issue a new one.'),{statusCode:410});
+      const existing=await client.query('SELECT 1 FROM school_memberships WHERE school_id=$1 AND user_id=$2',[targetSchoolId,auth.userId]);
+      if(existing.rowCount)throw Object.assign(new Error('You already have a membership in this school.'),{statusCode:409});
+      await client.query("INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,'active')",[targetSchoolId,auth.userId,invite.role_id]);
+      await client.query('UPDATE school_invitations SET accepted_at=now() WHERE school_id=$1 AND id=$2',[targetSchoolId,invite.id]);
+      await client.query("INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id,metadata) VALUES ($1,$2,'user.invitation.accept','school_invitation',$3,$4::jsonb)",[targetSchoolId,auth.userId,invite.id,JSON.stringify({email:auth.email})]);
+      return {schoolId:targetSchoolId,schoolName:String(invite.school_name),roleId:String(invite.role_id),roleName:String(invite.role_name)};
+    });
+    const rotated=await createSession(auth.userId,targetSchoolId);
+    const permissions=await withSchoolTransaction(targetSchoolId,async client=>{
+      const r=await client.query('SELECT permission_code FROM role_permissions WHERE role_id=$1 ORDER BY permission_code',[membership.roleId]);
+      return r.rows.map(row=>String(row.permission_code));
+    });
+    await withSchoolTransaction(auth.schoolId,client=>client.query("UPDATE auth_sessions SET revoked_at=now() WHERE id=$1 AND school_id=$2 AND revoked_at IS NULL",[auth.sessionId,auth.schoolId]).then(()=>undefined));
+    res.status(200).json({token:rotated.token,tokenType:'Bearer',expiresAt:rotated.expiresAt.toISOString(),user:{id:auth.userId,email:auth.email,fullName:auth.fullName,mustChangePassword:auth.mustChangePassword},school:{id:membership.schoolId,name:membership.schoolName},role:membership.roleName,permissions});
+  }catch(error){next(error);}
+});
 
 app.get('/api/v1/auth/workspaces',requireAuth,async(req,res,next)=>{
   try{
