@@ -8,10 +8,15 @@ import { operationsRouter } from './operations.js';
 import { formatMinorUnitsKes, parseKesToMinorUnits, validateJournal } from './domain/ledger.js';
 
 const app = express();
+const loginAttempts = new Map<string,{count:number;resetAt:number}>();
+const minorToDecimal = (amount:bigint) => (amount/100n).toString()+'.'+(amount%100n).toString().padStart(2,'0');
 app.disable('x-powered-by');
-app.use(express.json({ limit: '64kb', strict: true }));
+app.use(express.json({ limit: '300kb', strict: true }));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Content-Security-Policy', \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'\");
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Cache-Control', 'no-store');
   next();
@@ -168,7 +173,7 @@ app.post('/api/v1/auth/login', async (req, res, next) => {
       res.status(401).json({ error: 'Invalid credentials or school membership.' });
       return;
     }
-    const session = await createSession(user.id,schoolId);
+    loginAttempts.delete(attemptKey);\n    const session = await createSession(user.id,schoolId);
     await withSchoolTransaction(schoolId, async client => {
       await client.query(
         "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id) VALUES ($1,$2,'auth.login','user',$2)",
@@ -322,7 +327,7 @@ app.post('/api/v1/ledger/journals', requireAuth, requirePermission('ledger.post'
       for (const [index,line] of lines.entries()) {
         await client.query(
           'INSERT INTO journal_lines (school_id,journal_entry_id,account_id,line_number,debit,credit,memo) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-          [auth.schoolId,entryId,line.accountId,index+1,(Number(line.debitMinor)/100).toFixed(2),(Number(line.creditMinor)/100).toFixed(2),line.memo ?? null],
+          [auth.schoolId,entryId,line.accountId,index+1,minorToDecimal(line.debitMinor),minorToDecimal(line.creditMinor),line.memo ?? null],
         );
       }
       await client.query("UPDATE journal_entries SET status='posted' WHERE id=$1 AND school_id=$2",[entryId,auth.schoolId]);
