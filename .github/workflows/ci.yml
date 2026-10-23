@@ -68,3 +68,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Smoke-test configured production deployment
+        if: vars.PRODUCTION_BASE_URL != ''
+        env:
+          PRODUCTION_BASE_URL: ${{ vars.PRODUCTION_BASE_URL }}
+        run: bash scripts/smoke-deployment.sh
