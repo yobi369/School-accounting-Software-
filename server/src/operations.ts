@@ -9,6 +9,12 @@ import { parseKesToMinorUnits, validateJournal } from './domain/ledger.js';
 export const operationsRouter = Router();
 operationsRouter.use(requireAuth);
 
+function sqlDate(value:unknown):string {
+  if(value instanceof Date){
+    return `${value.getFullYear()}-${String(value.getMonth()+1).padStart(2,'0')}-${String(value.getDate()).padStart(2,'0')}`;
+  }
+  return String(value).slice(0,10);
+}
 function amountString(minor: bigint): string {
   const sign = minor < 0n ? '-' : '';
   const absolute = minor < 0n ? -minor : minor;
@@ -271,7 +277,7 @@ operationsRouter.post('/expenses/:id/approve',requirePermission('expenses.approv
       const found=await c.query("SELECT * FROM expenses WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
       if(!found.rowCount||found.rows[0].status!=='submitted')throw Object.assign(new Error('Only a submitted expense can be approved.'),{statusCode:409});
       const e=found.rows[0];if(String(e.requested_by)===auth.userId)throw Object.assign(new Error('The requester cannot approve their own expense.'),{statusCode:403});const amount=parseKesToMinorUnits(String(e.amount));
-      const journal=await postJournal(c,auth.schoolId,auth.userId,String(e.incurred_on).slice(0,10),`Expense ${e.expense_number}: ${e.description}`,'expense_approval',id.data,[
+      const journal=await postJournal(c,auth.schoolId,auth.userId,sqlDate(e.incurred_on),`Expense ${e.expense_number}: ${e.description}`,'expense_approval',id.data,[
         {accountId:e.expense_account_id,debit:amountString(amount),credit:'0.00'},
         {accountCode:'2000',debit:'0.00',credit:amountString(amount)},
       ]);
@@ -486,7 +492,7 @@ operationsRouter.post('/accounting/opening-balances',requirePermission('school.m
   try{
     const result=await withSchoolTransaction(auth.schoolId,async c=>{
       const year=await c.query("SELECT id,starts_on,status FROM financial_years WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,d.financialYearId]);
-      if(!year.rowCount||year.rows[0].status!=='open'||String(year.rows[0].starts_on).slice(0,10)!==d.postingDate)throw Object.assign(new Error('Opening balances must be posted on the start date of an open financial year.'),{statusCode:422});
+      if(!year.rowCount||year.rows[0].status!=='open'||sqlDate(year.rows[0].starts_on)!==d.postingDate)throw Object.assign(new Error('Opening balances must be posted on the start date of an open financial year.'),{statusCode:422});
       const existing=await c.query("SELECT count(*)::int AS n FROM journal_entries WHERE school_id=$1 AND financial_year_id=$2 AND status='posted'",[auth.schoolId,d.financialYearId]);
       if(existing.rows[0].n>0)throw Object.assign(new Error('Opening balances can only be posted before any other journal in the financial year.'),{statusCode:409});
       const lines=d.lines.map(l=>({accountId:l.accountId,debit:amountString(parseKesToMinorUnits(l.debit)),credit:amountString(parseKesToMinorUnits(l.credit)),memo:l.memo}));
@@ -718,7 +724,7 @@ operationsRouter.post('/fees/waivers/:id/approve',requirePermission('fees.manage
          COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived`,[auth.schoolId,w.invoice_id]);
       const amount=parseKesToMinorUnits(String(w.amount));const allocated=parseKesToMinorUnits(String(settled.rows[0].allocated));const waived=parseKesToMinorUnits(String(settled.rows[0].waived));
       if(amount>parseKesToMinorUnits(String(inv.rows[0].amount))-allocated-waived)throw Object.assign(new Error('Invoice balance changed; the waiver no longer fits the outstanding amount.'),{statusCode:409});
-      const journal=await postJournal(c,auth.schoolId,auth.userId,String(w.waived_on).slice(0,10),'Fee waiver '+String(w.waiver_number),'fee_waiver',id.data,[
+      const journal=await postJournal(c,auth.schoolId,auth.userId,sqlDate(w.waived_on),'Fee waiver '+String(w.waiver_number),'fee_waiver',id.data,[
         {accountCode:'4200',debit:amountString(amount),credit:'0.00'},
         {accountCode:'1200',debit:'0.00',credit:amountString(amount)},
       ]);
@@ -857,11 +863,11 @@ operationsRouter.post('/accounting/years/:id/close',requirePermission('periods.m
         const difference=totalDebits-totalCredits;
         if(difference>0n)closingLines.push({accountCode:'3000',debit:'0.00',credit:amountString(difference)});
         else if(difference<0n)closingLines.push({accountCode:'3000',debit:amountString(-difference),credit:'0.00'});
-        const posted=await postJournal(c,auth.schoolId,auth.userId,String(r.rows[0].ends_on).slice(0,10),`Year-end close ${r.rows[0].name}`,'year_end_close',id.data,closingLines);
+        const posted=await postJournal(c,auth.schoolId,auth.userId,sqlDate(r.rows[0].ends_on),`Year-end close ${r.rows[0].name}`,'year_end_close',id.data,closingLines);
         closingJournalId=posted.id;
       }
       const nextDates=await c.query("SELECT (ends_on+1)::date::text AS starts_on,((ends_on+1)+interval '1 year'-interval '1 day')::date::text AS ends_on FROM financial_years WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data]);
-      const nextStart=String(nextDates.rows[0].starts_on).slice(0,10);const nextEnd=String(nextDates.rows[0].ends_on).slice(0,10);
+      const nextStart=sqlDate(nextDates.rows[0].starts_on);const nextEnd=sqlDate(nextDates.rows[0].ends_on);
       let nextYear=await c.query("SELECT id,status,name FROM financial_years WHERE school_id=$1 AND starts_on=$2::date AND ends_on=$3::date FOR UPDATE",[auth.schoolId,nextStart,nextEnd]);
       let nextYearId:string;
       if(nextYear.rowCount){
