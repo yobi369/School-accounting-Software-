@@ -70,7 +70,7 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
         [schoolId, input.schoolName.trim(), schoolCode],
       );
       await client.query(
-        'INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',
+        'INSERT INTO users (id,email,password_hash,full_name,must_change_password) VALUES ($1,$2,$3,$4,true)',
         [userId, email, passwordHash, input.fullName.trim()],
       );
       const permissionCodes = [
@@ -144,14 +144,14 @@ app.post('/api/v1/auth/login', async (req, res, next) => {
     const { schoolId, email, password } = parsed.data;
     const db = requirePool();
     const userResult = await db.query(
-      "SELECT id,email,password_hash,full_name,status FROM users WHERE lower(email)=lower($1) LIMIT 1",
+      "SELECT id,email,password_hash,full_name,status,must_change_password FROM users WHERE lower(email)=lower($1) LIMIT 1",
       [email],
     );
     if (userResult.rowCount !== 1) {
       res.status(401).json({ error: 'Invalid credentials or school membership.' });
       return;
     }
-    const user = userResult.rows[0] as { id:string; email:string; password_hash:string; full_name:string; status:string };
+    const user = userResult.rows[0] as { id:string; email:string; password_hash:string; full_name:string; status:string; must_change_password:boolean };
     if (user.status !== 'active' || !(await verifyPassword(password,user.password_hash))) {
       res.status(401).json({ error: 'Invalid credentials or school membership.' });
       return;
@@ -176,12 +176,34 @@ app.post('/api/v1/auth/login', async (req, res, next) => {
     });
     res.status(200).json({
       token: session.token, tokenType: 'Bearer', expiresAt: session.expiresAt.toISOString(),
-      user: { id:user.id,email:user.email,fullName:user.full_name },
+      user: { id:user.id,email:user.email,fullName:user.full_name,mustChangePassword:user.must_change_password },
       school: { id:schoolId,name:membership.school_name },
     });
   } catch (error) {
     next(error);
   }
+});
+
+
+app.post('/api/v1/auth/change-password', requireAuth, async (req,res,next) => {
+  try {
+    const parsed=z.object({currentPassword:z.string().min(1).max(200),newPassword:z.string().min(12).max(200)}).safeParse(req.body);
+    if(!parsed.success){res.status(400).json({error:'New password must be at least 12 characters.',details:parsed.error.flatten()});return;}
+    if(parsed.data.currentPassword===parsed.data.newPassword){res.status(422).json({error:'Choose a new password different from the current password.'});return;}
+    const auth=authContext(req);
+    const db=requirePool();
+    const current=await db.query('SELECT password_hash FROM users WHERE id=$1 AND status=\'active\'',[auth.userId]);
+    if(!current.rowCount||!(await verifyPassword(parsed.data.currentPassword,String(current.rows[0].password_hash)))){
+      res.status(401).json({error:'Current password is incorrect.'});return;
+    }
+    const passwordHash=await hashPassword(parsed.data.newPassword);
+    await withSchoolTransaction(auth.schoolId,async client=>{
+      await client.query('UPDATE users SET password_hash=$2,must_change_password=false WHERE id=$1',[auth.userId,passwordHash]);
+      await client.query('UPDATE auth_sessions SET revoked_at=now() WHERE user_id=$1 AND school_id=$2 AND id<>$3 AND revoked_at IS NULL',[auth.userId,auth.schoolId,auth.sessionId]);
+      await client.query("INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id) VALUES ($1,$2,'auth.password.change','user',$2)",[auth.schoolId,auth.userId]);
+    });
+    res.json({changed:true,message:'Password updated. Other sessions for this school were revoked.'});
+  }catch(error){next(error);}
 });
 
 app.post('/api/v1/auth/logout', requireAuth, async (req,res,next) => {
@@ -200,7 +222,7 @@ app.post('/api/v1/auth/logout', requireAuth, async (req,res,next) => {
 
 app.get('/api/v1/auth/me', requireAuth, (req,res) => {
   const auth = authContext(req);
-  res.json({ user:{id:auth.userId,email:auth.email,fullName:auth.fullName},school:{id:auth.schoolId,name:auth.schoolName},role:auth.role,permissions:auth.permissions });
+  res.json({ user:{id:auth.userId,email:auth.email,fullName:auth.fullName,mustChangePassword:auth.mustChangePassword},school:{id:auth.schoolId,name:auth.schoolName},role:auth.role,permissions:auth.permissions });
 });
 
 app.get('/api/v1/ledger/accounts', requireAuth, requirePermission('ledger.read'), async (req,res,next) => {
