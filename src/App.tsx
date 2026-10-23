@@ -114,13 +114,13 @@ function Workspace({session,onLogout}:{session:SchoolSession;onLogout:()=>void})
       let next:Record<string,unknown>={};
       if(page==='overview')next=await apiRequest('/overview',session) as Record<string,unknown>;
       if(page==='students')next=await apiRequest('/students',session) as Record<string,unknown>;
-      if(page==='fees'){const [invoices,students]=await Promise.all([apiRequest('/fees/invoices',session),apiRequest('/students',session)]);next={...(invoices as object),...(students as object)};}
-      if(page==='expenses'){const [expenses,accounts]=await Promise.all([apiRequest('/expenses',session),apiRequest('/ledger/accounts',session)]);next={...(expenses as object),...(accounts as object)};}
+      if(page==='fees'){const [invoices,students,waivers]=await Promise.all([apiRequest('/fees/invoices',session),apiRequest('/students',session),apiRequest('/fees/waivers',session)]);next={...(invoices as object),...(students as object),...(waivers as object)};}
+      if(page==='expenses'){const [expenses,accounts,suppliers]=await Promise.all([apiRequest('/expenses',session),apiRequest('/ledger/accounts',session),apiRequest('/suppliers',session)]);next={...(expenses as object),...(accounts as object),...(suppliers as object)};}
       if(page==='ledger'){const [accounts,journals,periods]=await Promise.all([apiRequest('/ledger/accounts',session),apiRequest('/ledger/journals',session),apiRequest('/accounting/periods',session)]);next={...(accounts as object),...(journals as object),...(periods as object)};}
       if(page==='bank'){const [bankAccounts,ledgerAccounts]=await Promise.all([apiRequest('/bank/accounts',session),apiRequest('/ledger/accounts',session)]);next={...(bankAccounts as object),ledgerAccounts:(ledgerAccounts as Record<string,unknown>).accounts};}
       if(page==='audit')next=await apiRequest('/audit-events',session) as Record<string,unknown>;
       if(page==='users')next=await apiRequest('/users',session) as Record<string,unknown>;
-      if(page==='settings')next=await apiRequest('/accounting/periods',session) as Record<string,unknown>;
+      if(page==='settings'){const [periodData,budgetData]=await Promise.all([apiRequest('/accounting/periods',session),apiRequest('/budgets',session)]);next={...(periodData as object),...(budgetData as object)};}
       setData(next);
       const cachedAccounts=Array.isArray(next.ledgerAccounts)?next.ledgerAccounts:next.accounts;
       if(Array.isArray(cachedAccounts))sessionStorage.setItem('shuleledger.accounts.'+session.school.id,JSON.stringify(cachedAccounts));
