@@ -183,7 +183,8 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
         if(allocated<=0n)throw Object.assign(new Error('Each allocation must be greater than zero.'),{statusCode:422});
         const inv=await c.query(
           `SELECT i.amount::text,i.student_id,i.status,
-             COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated
+             COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
+             COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived
            FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2 FOR UPDATE`,[auth.schoolId,allocation.invoiceId]);
         if(!inv.rowCount||inv.rows[0].student_id!==d.studentId||inv.rows[0].status==='void')throw Object.assign(new Error('An allocated invoice is missing, void, or belongs to another student.'),{statusCode:422});
         const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(inv.rows[0].allocated))-parseKesToMinorUnits(String(inv.rows[0].waived));
