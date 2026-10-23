@@ -46,8 +46,9 @@ jobs:
           pg_dump --format=custom --no-owner --no-acl --dbname "$MIGRATIONS_DATABASE_URL" --file=/tmp/shuleledger-ci.dump
           PGPASSWORD=postgres createdb -h localhost -U postgres shuleledger_restore
           pg_restore --exit-on-error --no-owner --no-acl --dbname=postgres://postgres:postgres@localhost:5432/shuleledger_restore /tmp/shuleledger-ci.dump
-          test "$(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -Atc 'SELECT count(*) FROM schema_migrations')" -ge 19
-          test "$(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -Atc 'SELECT count(*) FROM journal_entries')" -ge 0
+          diff -u <(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger -Atc 'SELECT version || \'|\' || checksum FROM schema_migrations ORDER BY version') <(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -Atc 'SELECT version || \'|\' || checksum FROM schema_migrations ORDER BY version')
+          test "$(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -Atc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname IN ('accounts','journal_entries','journal_lines','students','fee_invoices','expenses') AND c.relrowsecurity AND c.relforcerowsecurity")" -eq 6
+          test "$(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('schema_migrations','schools','accounts','journal_entries','journal_lines','students','fee_invoices','expenses')")" -eq 8
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
