@@ -614,18 +614,39 @@ operationsRouter.post('/fees/waivers',requirePermission('fees.manage'),wrap(asyn
       const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(settled.rows[0].allocated))-parseKesToMinorUnits(String(settled.rows[0].waived));
       if(amount>outstanding)throw Object.assign(new Error('Waiver exceeds the invoice outstanding balance.'),{statusCode:422});
       const id=randomUUID();
-      await c.query('INSERT INTO fee_waivers (id,school_id,waiver_number,invoice_id,amount,reason,waived_on,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',[id,auth.schoolId,d.waiverNumber,d.invoiceId,amountString(amount),d.reason,waivedOn,auth.userId]);
-      const journal=await postJournal(c,auth.schoolId,auth.userId,waivedOn,`Fee waiver ${d.waiverNumber}`,'fee_waiver',id,[
+      await c.query("INSERT INTO fee_waivers (id,school_id,waiver_number,invoice_id,amount,reason,waived_on,created_by,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'submitted')",[id,auth.schoolId,d.waiverNumber,d.invoiceId,amountString(amount),d.reason,waivedOn,auth.userId]);
+      await audit(c,auth.schoolId,auth.userId,'fee.waiver.submit','fee_waiver',id,{invoiceId:d.invoiceId,amount:amountString(amount),reason:d.reason});
+      return {id,waiverNumber:d.waiverNumber,invoiceId:d.invoiceId,amount:amountString(amount),reason:d.reason,status:'submitted'};
+    });
+    res.status(201).json({waiver,message:'Waiver submitted. A different authorized user must approve it before it affects the ledger.'});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+operationsRouter.post('/fees/waivers/:id/approve',requirePermission('fees.manage'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid waiver ID.'});return;}
+  const auth=authContext(req);
+  try{
+    const waiver=await withSchoolTransaction(auth.schoolId,async c=>{
+      const found=await c.query('SELECT * FROM fee_waivers WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,id.data]);
+      if(!found.rowCount||found.rows[0].status!=='submitted')throw Object.assign(new Error('Only a submitted waiver can be approved.'),{statusCode:409});
+      const w=found.rows[0];if(String(w.created_by)===auth.userId)throw Object.assign(new Error('The requester cannot approve their own fee waiver.'),{statusCode:403});
+      const inv=await c.query('SELECT amount::text,status FROM fee_invoices WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,w.invoice_id]);
+      if(!inv.rowCount||inv.rows[0].status==='void')throw Object.assign(new Error('The invoice is no longer available.'),{statusCode:409});
+      const settled=await c.query(
+        `SELECT COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=$2 AND r.status='posted'),0)::text AS allocated,
+         COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived`,[auth.schoolId,w.invoice_id]);
+      const amount=parseKesToMinorUnits(String(w.amount));const allocated=parseKesToMinorUnits(String(settled.rows[0].allocated));const waived=parseKesToMinorUnits(String(settled.rows[0].waived));
+      if(amount>parseKesToMinorUnits(String(inv.rows[0].amount))-allocated-waived)throw Object.assign(new Error('Invoice balance changed; the waiver no longer fits the outstanding amount.'),{statusCode:409});
+      const journal=await postJournal(c,auth.schoolId,auth.userId,String(w.waived_on).slice(0,10),'Fee waiver '+String(w.waiver_number),'fee_waiver',id.data,[
         {accountCode:'4200',debit:amountString(amount),credit:'0.00'},
         {accountCode:'1200',debit:'0.00',credit:amountString(amount)},
       ]);
-      await c.query('UPDATE fee_waivers SET journal_entry_id=$3 WHERE school_id=$1 AND id=$2',[auth.schoolId,id,journal.id]);
-      const totalSettled=amount+parseKesToMinorUnits(String(settled.rows[0].allocated))+parseKesToMinorUnits(String(settled.rows[0].waived));
-      await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric >= amount THEN 'paid' WHEN $4::numeric > 0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,d.invoiceId,amountString(totalSettled),String(settled.rows[0].allocated)]);
-      await audit(c,auth.schoolId,auth.userId,'fee.waiver.post','fee_waiver',id,{invoiceId:d.invoiceId,journalEntryId:journal.id,amount:amountString(amount),reason:d.reason});
-      return {id,waiverNumber:d.waiverNumber,invoiceId:d.invoiceId,amount:amountString(amount),reason:d.reason,status:'posted',journalEntryId:journal.id};
+      await c.query("UPDATE fee_waivers SET status='posted',approved_by=$3,approved_at=now(),journal_entry_id=$4 WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data,auth.userId,journal.id]);
+      const total=allocated+waived+amount;
+      await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,w.invoice_id,amountString(total),amountString(allocated)]);
+      await audit(c,auth.schoolId,auth.userId,'fee.waiver.approve','fee_waiver',id.data,{journalEntryId:journal.id,requestedBy:w.created_by});
+      return {id:id.data,status:'posted',journalEntryId:journal.id,approvedBy:auth.userId};
     });
-    res.status(201).json({waiver});
+    res.json({waiver});
   }catch(error){if(!handleError(res,error))throw error;}
 }));
 
