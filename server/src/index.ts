@@ -234,13 +234,13 @@ app.post('/api/v1/auth/switch-workspace',requireAuth,async(req,res,next)=>{
     if(!membership){res.status(403).json({error:'You do not have active membership in that school.'});return;}
     const rotated=await createSession(auth.userId,target);
     const permissions=await withSchoolTransaction(target,async client=>{
-      await client.query("UPDATE auth_sessions SET revoked_at=now() WHERE id=$1 AND school_id=$2 AND revoked_at IS NULL",[auth.sessionId,auth.schoolId]);
       const r=await client.query('SELECT permission_code FROM role_permissions WHERE role_id=$1 ORDER BY permission_code',[membership.role_id]);
       await client.query(
         "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id,metadata) VALUES ($1,$2,'auth.workspace.switch','school',$3,$4::jsonb)",
         [target,auth.userId,target,JSON.stringify({fromSchoolId:auth.schoolId})]);
       return r.rows.map(row=>String(row.permission_code));
     });
+    await withSchoolTransaction(auth.schoolId,client=>client.query("UPDATE auth_sessions SET revoked_at=now() WHERE id=$1 AND school_id=$2 AND revoked_at IS NULL",[auth.sessionId,auth.schoolId]).then(()=>undefined));
     res.json({
       token:rotated.token,tokenType:'Bearer',expiresAt:rotated.expiresAt.toISOString(),
       user:{id:auth.userId,email:membership.email,fullName:membership.full_name,mustChangePassword:membership.must_change_password},
