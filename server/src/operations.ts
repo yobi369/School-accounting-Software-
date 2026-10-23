@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';
@@ -611,6 +611,30 @@ operationsRouter.get('/users',requirePermission('users.manage'),wrap(async(req,r
   res.json({users:result.rows});
 }));
 const userCreateSchema=z.object({fullName:z.string().trim().min(2).max(160),email:z.string().trim().email().max(254),role:z.string().trim().min(2).max(80),password:z.string().min(12).max(200)});
+
+const invitationSchema=z.object({email:z.string().trim().email().max(254),role:z.string().trim().min(2).max(80)});
+operationsRouter.post('/users/invitations',requirePermission('users.manage'),wrap(async(req,res)=>{
+  const p=invitationSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Invalid invitation details.',details:p.error.flatten()});return;}
+  const auth=authContext(req);const email=p.data.email.toLowerCase();const roleName=p.data.role.toLowerCase();
+  try{
+    const invitation=await withSchoolTransaction(auth.schoolId,async c=>{
+      const role=await c.query('SELECT id FROM roles WHERE school_id=$1 AND name=$2',[auth.schoolId,roleName]);
+      if(!role.rowCount)throw Object.assign(new Error('Role not found in this school.'),{statusCode:422});
+      const user=await c.query('SELECT id FROM users WHERE lower(email)=lower($1) AND status=\'active\'',[email]);
+      if(!user.rowCount)throw Object.assign(new Error('Only an existing active account can accept a workspace invitation. Create a temporary account first for new staff.'),{statusCode:422});
+      const member=await c.query('SELECT 1 FROM school_memberships WHERE school_id=$1 AND user_id=$2',[auth.schoolId,user.rows[0].id]);
+      if(member.rowCount)throw Object.assign(new Error('This user already has a membership in this school.'),{statusCode:409});
+      await c.query('UPDATE school_invitations SET revoked_at=now() WHERE school_id=$1 AND lower(email)=lower($2) AND accepted_at IS NULL AND revoked_at IS NULL',[auth.schoolId,email]);
+      const id=randomUUID();const token=auth.schoolId+'.'+randomBytes(32).toString('base64url');const tokenHash=createHash('sha256').update(token).digest('hex');
+      const expiresAt=new Date(Date.now()+7*24*60*60*1000);
+      await c.query('INSERT INTO school_invitations (id,school_id,email,role_id,token_hash,invited_by,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)',[id,auth.schoolId,email,role.rows[0].id,tokenHash,auth.userId,expiresAt]);
+      await audit(c,auth.schoolId,auth.userId,'user.invitation.create','school_invitation',id,{email,role:roleName,expiresAt:expiresAt.toISOString()});
+      return {id,email,role:roleName,token,expiresAt:expiresAt.toISOString()};
+    });
+    res.status(201).json({invitation,message:'Share the token with the account holder through a trusted channel. The token is shown only once and expires in seven days.'});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
 operationsRouter.post('/users',requirePermission('users.manage'),wrap(async(req,res)=>{
   const p=userCreateSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Invalid user details.',details:p.error.flatten()});return;}
   const auth=authContext(req);const d=p.data;const email=d.email.toLowerCase();
@@ -620,8 +644,11 @@ operationsRouter.post('/users',requirePermission('users.manage'),wrap(async(req,
       if(!role.rowCount)throw Object.assign(new Error('Requested role is not configured for this school.'),{statusCode:422});
       let user=await c.query('SELECT id FROM users WHERE lower(email)=lower($1)',[email]);
       let userId:string;
-      if(user.rowCount){userId=String(user.rows[0].id);}
-      else{
+      if(user.rowCount){
+        const membership=await c.query('SELECT 1 FROM school_memberships WHERE school_id=$1 AND user_id=$2',[auth.schoolId,user.rows[0].id]);
+        if(membership.rowCount)throw Object.assign(new Error('This user already has a membership in this school.'),{statusCode:409});
+        throw Object.assign(new Error('This email already has an account. Create a school invitation and have the account holder accept it.'),{statusCode:409});
+      }else{
         const {hashPassword}=await import('./auth.js');
         userId=randomUUID();
         await c.query('INSERT INTO users (id,email,password_hash,full_name,must_change_password) VALUES ($1,$2,$3,$4,true)',[userId,email,await hashPassword(d.password),d.fullName]);
