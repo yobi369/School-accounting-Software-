@@ -160,10 +160,18 @@ const receiptSchema=z.object({
 operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap(async(req,res)=>{
   const parsed=receiptSchema.safeParse(req.body);if(!parsed.success){res.status(400).json({error:'Invalid receipt details.',details:parsed.error.flatten()});return;}
   const d=parsed.data;const auth=authContext(req);const receivedOn=d.receivedOn??new Date().toISOString().slice(0,10);
+  const idempotencyKey=req.header('Idempotency-Key');if(!idempotencyKey||idempotencyKey.length<8||idempotencyKey.length>200){res.status(400).json({error:'An Idempotency-Key header between 8 and 200 characters is required.'});return;}
+  const requestHash=createHash('sha256').update(JSON.stringify(d)).digest('hex');
   const amount=parseKesToMinorUnits(d.amount);const allocationTotal=d.allocations.reduce((sum,a)=>sum+parseKesToMinorUnits(a.amount),0n);
   if(amount<=0n||allocationTotal!==amount){res.status(422).json({error:'Receipt amount must be positive and fully allocated to invoices.'});return;}
   try{
-    const receipt=await withSchoolTransaction(auth.schoolId,async c=>{
+    const outcome=await withSchoolTransaction(auth.schoolId,async c=>{
+      const existing=await c.query('SELECT request_hash,response_body FROM idempotency_records WHERE school_id=$1 AND idempotency_key=$2 FOR UPDATE',[auth.schoolId,idempotencyKey]);
+      if(existing.rowCount){
+        if(existing.rows[0].request_hash!==requestHash)throw Object.assign(new Error('Idempotency key was already used for a different receipt request.'),{statusCode:409});
+        const saved=existing.rows[0].response_body as {receipt:Record<string,unknown>};
+        return {receipt:saved.receipt,duplicate:true};
+      }
       const student=await c.query("SELECT id FROM students WHERE school_id=$1 AND id=$2 AND status='active'",[auth.schoolId,d.studentId]);
       if(!student.rowCount)throw Object.assign(new Error('Active student not found in this school.'),{statusCode:422});
       const receiptId=randomUUID();
@@ -178,7 +186,7 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
              COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated
            FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2 FOR UPDATE`,[auth.schoolId,allocation.invoiceId]);
         if(!inv.rowCount||inv.rows[0].student_id!==d.studentId||inv.rows[0].status==='void')throw Object.assign(new Error('An allocated invoice is missing, void, or belongs to another student.'),{statusCode:422});
-        const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(inv.rows[0].allocated));
+        const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(inv.rows[0].allocated))-parseKesToMinorUnits(String(inv.rows[0].waived));
         if(allocated>outstanding)throw Object.assign(new Error('Allocation exceeds the invoice outstanding balance.'),{statusCode:422});
         await c.query('INSERT INTO fee_receipt_allocations (school_id,receipt_id,invoice_id,amount) VALUES ($1,$2,$3,$4)',[auth.schoolId,receiptId,allocation.invoiceId,amountString(allocated)]);
       }
@@ -196,9 +204,11 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
          WHERE i.school_id=$1 AND i.id=ANY($2::uuid[])`,
         [auth.schoolId,d.allocations.map(a=>a.invoiceId)]);
       await audit(c,auth.schoolId,auth.userId,'fee.receipt.post','fee_receipt',receiptId,{receiptNumber:d.receiptNumber,journalEntryId:journal.id,amount:amountString(amount)});
-      return {id:receiptId,receiptNumber:d.receiptNumber,studentId:d.studentId,receivedOn,amount:amountString(amount),paymentMethod:d.paymentMethod,status:'posted',journalEntryId:journal.id};
+      const receipt={id:receiptId,receiptNumber:d.receiptNumber,studentId:d.studentId,receivedOn,amount:amountString(amount),paymentMethod:d.paymentMethod,status:'posted',journalEntryId:journal.id};
+      await c.query('INSERT INTO idempotency_records (school_id,idempotency_key,request_hash,response_status,response_body,resource_type,resource_id) VALUES ($1,$2,$3,201,$4::jsonb,\'fee_receipt\',$5)',[auth.schoolId,idempotencyKey,requestHash,JSON.stringify({receipt}),receiptId]);
+      return {receipt,duplicate:false};
     });
-    res.status(201).json({receipt});
+    res.status(outcome.duplicate?200:201).json({receipt:outcome.receipt,duplicate:outcome.duplicate});
   }catch(error){if(!handleError(res,error))throw error;}
 }));
 
