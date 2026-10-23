@@ -257,7 +257,7 @@ operationsRouter.post('/expenses/:id/approve',requirePermission('expenses.approv
     const expense=await withSchoolTransaction(auth.schoolId,async c=>{
       const found=await c.query("SELECT * FROM expenses WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
       if(!found.rowCount||found.rows[0].status!=='submitted')throw Object.assign(new Error('Only a submitted expense can be approved.'),{statusCode:409});
-      const e=found.rows[0];const amount=parseKesToMinorUnits(String(e.amount));
+      const e=found.rows[0];if(String(e.requested_by)===auth.userId)throw Object.assign(new Error('The requester cannot approve their own expense.'),{statusCode:403});const amount=parseKesToMinorUnits(String(e.amount));
       const journal=await postJournal(c,auth.schoolId,auth.userId,String(e.incurred_on).slice(0,10),`Expense ${e.expense_number}: ${e.description}`,'expense_approval',id.data,[
         {accountId:e.expense_account_id,debit:amountString(amount),credit:'0.00'},
         {accountCode:'2000',debit:'0.00',credit:amountString(amount)},
@@ -277,7 +277,7 @@ operationsRouter.post('/expenses/:id/pay',requirePermission('expenses.pay'),wrap
     const expense=await withSchoolTransaction(auth.schoolId,async c=>{
       const found=await c.query("SELECT * FROM expenses WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
       if(!found.rowCount||found.rows[0].status!=='approved')throw Object.assign(new Error('Only an approved expense can be paid.'),{statusCode:409});
-      const e=found.rows[0];const account=await c.query("SELECT id,account_type FROM accounts WHERE school_id=$1 AND id=$2 AND is_active=true",[auth.schoolId,body.data.paymentAccountId]);
+      const e=found.rows[0];if(String(e.approved_by)===auth.userId)throw Object.assign(new Error('The approver cannot pay the same expense.'),{statusCode:403});const account=await c.query("SELECT id,account_type FROM accounts WHERE school_id=$1 AND id=$2 AND is_active=true",[auth.schoolId,body.data.paymentAccountId]);
       if(!account.rowCount||!['asset'].includes(account.rows[0].account_type))throw Object.assign(new Error('Select an active cash or bank asset account.'),{statusCode:422});
       const amount=parseKesToMinorUnits(String(e.amount));
       const journal=await postJournal(c,auth.schoolId,auth.userId,paidOn,`Expense payment ${e.expense_number}`,'expense_payment',id.data,[
