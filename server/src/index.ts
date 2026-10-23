@@ -1,65 +1,359 @@
-import express from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { authContext, createSession, hashPassword, requireAuth, requirePermission, safeSecretEquals, verifyPassword } from './auth.js';
+import { pool, requirePool, withSchoolTransaction } from './db.js';
 import { formatMinorUnitsKes, parseKesToMinorUnits, validateJournal } from './domain/ledger.js';
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '64kb' }));
+app.use(express.json({ limit: '64kb', strict: true }));
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
 
 app.get('/health', (_req, res) => {
-  res.status(200).json({ status: 'ok', service: 'shuleledger-api', mode: 'foundation-only' });
+  res.status(200).json({ status: 'ok', service: 'shuleledger-api' });
 });
 
 app.get('/api/v1/status', (_req, res) => {
   res.status(200).json({
     name: 'ShuleLedger API',
-    readiness: 'development-foundation',
+    readiness: 'development',
     productionReady: false,
-    enabled: ['health-check', 'journal-domain-validation'],
-    notYetEnabled: ['authentication', 'database-persistence', 'school-tenancy', 'financial-posting', 'fees', 'expenses', 'offline-sync'],
+    databaseConfigured: Boolean(pool),
+    enabled: ['health-check', 'exact-decimal-validation', 'database-authentication', 'tenant-context', 'manual-journal-posting'],
+    notYetEnabled: ['complete-fee-workflows', 'expense-approval-workflows', 'bank-reconciliation', 'report-export', 'offline-sync', 'backup-recovery-verification'],
   });
 });
 
-const journalSchema = z.object({
-  schoolId: z.string().min(1).max(100),
-  currency: z.literal('KES'),
-  lines: z.array(z.object({
-    accountId: z.string().min(1).max(100),
-    debit: z.string().default('0.00'),
-    credit: z.string().default('0.00'),
-    memo: z.string().max(500).optional(),
-  })).min(2).max(500),
+const bootstrapSchema = z.object({
+  schoolName: z.string().trim().min(2).max(160),
+  schoolCode: z.string().trim().min(2).max(24).regex(/^[a-zA-Z0-9_-]+$/),
+  fullName: z.string().trim().min(2).max(160),
+  email: z.string().trim().email().max(254),
+  password: z.string().min(12).max(200),
+  financialYearStart: z.string().regex(/^\d{4}-01-01$/).optional(),
+});
+app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
+  try {
+    const configured = process.env.BOOTSTRAP_TOKEN;
+    const provided = req.header('x-bootstrap-token') ?? '';
+    if (!configured || !safeSecretEquals(provided, configured)) {
+      res.status(403).json({ error: 'Bootstrap is not authorized.' });
+      return;
+    }
+    const parsed = bootstrapSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid setup details.', details: parsed.error.flatten() });
+      return;
+    }
+    const input = parsed.data;
+    const schoolId = randomUUID();
+    const userId = randomUUID();
+    const email = input.email.toLowerCase();
+    const schoolCode = input.schoolCode.toUpperCase();
+    const passwordHash = await hashPassword(input.password);
+    const currentYear = Number((input.financialYearStart ?? `${new Date().getFullYear()}-01-01`).slice(0, 4));
+    if (currentYear < 2000 || currentYear > 2200) {
+      res.status(400).json({ error: 'Financial year must be a valid year.' });
+      return;
+    }
+
+    await withSchoolTransaction(schoolId, async client => {
+      await client.query(
+        'INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',
+        [schoolId, input.schoolName.trim(), schoolCode],
+      );
+      await client.query(
+        'INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',
+        [userId, email, passwordHash, input.fullName.trim()],
+      );
+      const permissionCodes = [
+        'school.manage','users.manage','students.read','students.manage','fees.read','fees.manage',
+        'receipts.create','ledger.read','ledger.post','expenses.read','expenses.create',
+        'expenses.approve','expenses.pay','bank.read','bank.reconcile','reports.read','reports.export',
+        'periods.manage','audit.read',
+      ];
+      for (const code of permissionCodes) {
+        await client.query('INSERT INTO permissions (code,description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING', [code, code.replaceAll('.', ' ')]);
+      }
+      const rolePermissions: Record<string, string[]> = {
+        school_admin: permissionCodes,
+        bursar: ['students.read','fees.read','fees.manage','receipts.create','reports.read'],
+        accountant: ['students.read','fees.read','receipts.create','ledger.read','ledger.post','expenses.read','expenses.create','bank.read','bank.reconcile','reports.read','reports.export','audit.read'],
+        approver: ['expenses.read','expenses.approve','expenses.pay','reports.read'],
+        auditor: ['students.read','fees.read','ledger.read','expenses.read','bank.read','reports.read','reports.export','audit.read'],
+      };
+      const roleIds: Record<string,string> = {};
+      for (const [roleName, codes] of Object.entries(rolePermissions)) {
+        const roleId = randomUUID();
+        roleIds[roleName] = roleId;
+        await client.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)', [roleId,schoolId,roleName]);
+        for (const code of codes) {
+          await client.query('INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING', [roleId,code]);
+        }
+      }
+      await client.query('INSERT INTO school_memberships (school_id,user_id,role_id) VALUES ($1,$2,$3)', [schoolId,userId,roleIds.school_admin]);
+      const yearId = randomUUID();
+      const starts = `${currentYear}-01-01`;
+      const ends = `${currentYear}-12-31`;
+      await client.query('INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)', [yearId,schoolId,String(currentYear),starts,ends]);
+      for (let month=1; month<=12; month++) {
+        const periodStart = `${currentYear}-${String(month).padStart(2,'0')}-01`;
+        const periodEndDate = new Date(Date.UTC(currentYear,month,0));
+        const periodEnd = `${currentYear}-${String(month).padStart(2,'0')}-${String(periodEndDate.getUTCDate()).padStart(2,'0')}`;
+        await client.query('INSERT INTO accounting_periods (school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4)', [schoolId,yearId,periodStart,periodEnd]);
+      }
+      const accounts = [
+        ['1000','Cash on hand','asset'],['1100','Bank account','asset'],['1200','Fees receivable','asset'],
+        ['2000','Accounts payable','liability'],['3000','Opening fund balance','equity'],
+        ['4000','School fee income','income'],['4100','Other income','income'],
+        ['5000','Teaching and learning expenses','expense'],['5100','Administration expenses','expense'],
+      ];
+      for (const [code,name,type] of accounts) {
+        await client.query('INSERT INTO accounts (school_id,code,name,account_type) VALUES ($1,$2,$3,$4)', [schoolId,code,name,type]);
+      }
+      await client.query(
+        "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id,metadata) VALUES ($1,$2,'school.bootstrap','school',$1,$3::jsonb)",
+        [schoolId,userId,JSON.stringify({ schoolCode, email })],
+      );
+    });
+    res.status(201).json({ created: true, schoolId, message: 'School workspace created. Sign in with its school ID and the administrator credentials.' });
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.post('/api/v1/dev/validate-journal', (req, res) => {
-  // Development-only validator: does not persist or post entries.
-  if (process.env.NODE_ENV === 'production') {
-    res.status(404).json({ error: 'Not found' });
-    return;
-  }
-  const parsed = journalSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: 'Invalid request', details: parsed.error.flatten() });
-    return;
-  }
+const loginSchema = z.object({
+  schoolId: z.string().uuid(),
+  email: z.string().trim().email().max(254),
+  password: z.string().min(1).max(200),
+});
+app.post('/api/v1/auth/login', async (req, res, next) => {
   try {
-    const lines = parsed.data.lines.map(line => ({
+    const parsed = loginSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Enter a valid school ID, email, and password.' });
+      return;
+    }
+    const { schoolId, email, password } = parsed.data;
+    const db = requirePool();
+    const userResult = await db.query(
+      "SELECT id,email,password_hash,full_name,status FROM users WHERE lower(email)=lower($1) LIMIT 1",
+      [email],
+    );
+    if (userResult.rowCount !== 1) {
+      res.status(401).json({ error: 'Invalid credentials or school membership.' });
+      return;
+    }
+    const user = userResult.rows[0] as { id:string; email:string; password_hash:string; full_name:string; status:string };
+    if (user.status !== 'active' || !(await verifyPassword(password,user.password_hash))) {
+      res.status(401).json({ error: 'Invalid credentials or school membership.' });
+      return;
+    }
+    const membership = await withSchoolTransaction(schoolId, async client => {
+      const result = await client.query(
+        "SELECT m.id, sc.name AS school_name FROM school_memberships m JOIN schools sc ON sc.id=m.school_id WHERE m.school_id=$1 AND m.user_id=$2 AND m.status='active' AND sc.status='active' LIMIT 1",
+        [schoolId,user.id],
+      );
+      return result.rows[0] as {id:string; school_name:string} | undefined;
+    });
+    if (!membership) {
+      res.status(401).json({ error: 'Invalid credentials or school membership.' });
+      return;
+    }
+    const session = await createSession(user.id,schoolId);
+    await withSchoolTransaction(schoolId, async client => {
+      await client.query(
+        "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id) VALUES ($1,$2,'auth.login','user',$2)",
+        [schoolId,user.id],
+      );
+    });
+    res.status(200).json({
+      token: session.token, tokenType: 'Bearer', expiresAt: session.expiresAt.toISOString(),
+      user: { id:user.id,email:user.email,fullName:user.full_name },
+      school: { id:schoolId,name:membership.school_name },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/v1/auth/logout', requireAuth, async (req,res,next) => {
+  try {
+    const auth = authContext(req);
+    await withSchoolTransaction(auth.schoolId, async client => {
+      await client.query('UPDATE auth_sessions SET revoked_at=now() WHERE id=$1 AND school_id=$2 AND revoked_at IS NULL',[auth.sessionId,auth.schoolId]);
+      await client.query(
+        "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id) VALUES ($1,$2,'auth.logout','user',$2)",
+        [auth.schoolId,auth.userId],
+      );
+    });
+    res.status(204).end();
+  } catch (error) { next(error); }
+});
+
+app.get('/api/v1/auth/me', requireAuth, (req,res) => {
+  const auth = authContext(req);
+  res.json({ user:{id:auth.userId,email:auth.email,fullName:auth.fullName},school:{id:auth.schoolId,name:auth.schoolName},role:auth.role,permissions:auth.permissions });
+});
+
+app.get('/api/v1/ledger/accounts', requireAuth, requirePermission('ledger.read'), async (req,res,next) => {
+  try {
+    const auth = authContext(req);
+    const rows = await withSchoolTransaction(auth.schoolId, async client => client.query(
+      'SELECT id,code,name,account_type,is_active FROM accounts WHERE school_id=$1 AND is_active=true ORDER BY code',[auth.schoolId],
+    ));
+    res.json({ accounts:rows.rows });
+  } catch(error) { next(error); }
+});
+
+const journalSchema = z.object({
+  financialYearId: z.string().uuid(),
+  periodId: z.string().uuid(),
+  postingDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  description: z.string().trim().min(3).max(500),
+  lines: z.array(z.object({
+    accountId: z.string().uuid(),
+    debit: z.string().default('0'),
+    credit: z.string().default('0'),
+    memo: z.string().max(500).optional(),
+  })).min(2).max(200),
+});
+app.post('/api/v1/ledger/journals', requireAuth, requirePermission('ledger.post'), async (req,res,next) => {
+  try {
+    const auth = authContext(req);
+    const idempotencyKey = req.header('idempotency-key')?.trim();
+    if (!idempotencyKey || idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+      res.status(400).json({ error: 'An Idempotency-Key header of 8–200 characters is required.' });
+      return;
+    }
+    const parsed = journalSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid journal details.', details: parsed.error.flatten() });
+      return;
+    }
+    const input = parsed.data;
+    const lines = input.lines.map(line => ({
       accountId: line.accountId,
       debitMinor: parseKesToMinorUnits(line.debit),
       creditMinor: parseKesToMinorUnits(line.credit),
       memo: line.memo,
     }));
-    const result = validateJournal({ schoolId: parsed.data.schoolId, currency: parsed.data.currency, lines });
-    res.status(200).json({ valid: true, total: formatMinorUnitsKes(result.totalMinor), lineCount: result.lineCount, posted: false });
-  } catch (error) {
-    res.status(422).json({ valid: false, error: error instanceof Error ? error.message : 'Journal validation failed', posted: false });
-  }
+    const totals = validateJournal({schoolId:auth.schoolId,currency:'KES',lines});
+    const requestHash = createHash('sha256').update(JSON.stringify(input)).digest('hex');
+    const result = await withSchoolTransaction(auth.schoolId, async client => {
+      const existing = await client.query(
+        'SELECT request_hash,response_status,response_body,resource_id FROM idempotency_records WHERE school_id=$1 AND idempotency_key=$2 FOR UPDATE',
+        [auth.schoolId,idempotencyKey],
+      );
+      if (existing.rowCount) {
+        const row = existing.rows[0] as {request_hash:string;response_status:number|null;response_body:unknown;resource_id:string|null};
+        if (row.request_hash !== requestHash) return {status:409,body:{error:'Idempotency key was already used with different request content.'}};
+        if (row.response_body) return {status:row.response_status ?? 200,body:row.response_body};
+        return {status:409,body:{error:'A request with this idempotency key is still being processed. Retry shortly.'}};
+      }
+      await client.query(
+        'INSERT INTO idempotency_records (school_id,idempotency_key,request_hash) VALUES ($1,$2,$3)',
+        [auth.schoolId,idempotencyKey,requestHash],
+      );
+      await client.query('SELECT id FROM financial_years WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,input.financialYearId]);
+      const year = await client.query(
+        "SELECT id FROM financial_years WHERE school_id=$1 AND id=$2 AND status='open' AND starts_on <= $3::date AND ends_on >= $3::date",
+        [auth.schoolId,input.financialYearId,input.postingDate],
+      );
+      const period = await client.query(
+        "SELECT id FROM accounting_periods WHERE school_id=$1 AND id=$2 AND financial_year_id=$3 AND status='open' AND starts_on <= $4::date AND ends_on >= $4::date",
+        [auth.schoolId,input.periodId,input.financialYearId,input.postingDate],
+      );
+      if (!year.rowCount || !period.rowCount) return {status:422,body:{error:'Posting date must fall within an open financial year and its open accounting period.'}};
+      const accountIds = [...new Set(lines.map(line => line.accountId))];
+      const accounts = await client.query(
+        'SELECT id FROM accounts WHERE school_id=$1 AND is_active=true AND id=ANY($2::uuid[])',
+        [auth.schoolId,accountIds],
+      );
+      if (accounts.rowCount !== accountIds.length) return {status:422,body:{error:'One or more accounts are missing, inactive, or outside this school.'}};
+      const numberResult = await client.query(
+        'SELECT COALESCE(MAX(entry_number),0)+1 AS next_number FROM journal_entries WHERE school_id=$1 AND financial_year_id=$2',
+        [auth.schoolId,input.financialYearId],
+      );
+      const entryId = randomUUID();
+      const entryNumber = String(numberResult.rows[0].next_number);
+      await client.query(
+        "INSERT INTO journal_entries (id,school_id,financial_year_id,period_id,entry_number,posting_date,description,status,source_type,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,'draft','manual',$8)",
+        [entryId,auth.schoolId,input.financialYearId,input.periodId,entryNumber,input.postingDate,input.description,auth.userId],
+      );
+      for (const [index,line] of lines.entries()) {
+        await client.query(
+          'INSERT INTO journal_lines (school_id,journal_entry_id,account_id,line_number,debit,credit,memo) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+          [auth.schoolId,entryId,line.accountId,index+1,(Number(line.debitMinor)/100).toFixed(2),(Number(line.creditMinor)/100).toFixed(2),line.memo ?? null],
+        );
+      }
+      await client.query("UPDATE journal_entries SET status='posted' WHERE id=$1 AND school_id=$2",[entryId,auth.schoolId]);
+      const body = {id:entryId,entryNumber,postingDate:input.postingDate,status:'posted',currency:'KES',total:formatMinorUnitsKes(totals.totalMinor),lineCount:totals.lineCount};
+      await client.query(
+        'UPDATE idempotency_records SET response_status=201,response_body=$3::jsonb,resource_type=$4,resource_id=$5 WHERE school_id=$1 AND idempotency_key=$2',
+        [auth.schoolId,idempotencyKey,JSON.stringify(body),'journal_entry',entryId],
+      );
+      await client.query(
+        "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id,request_id,metadata) VALUES ($1,$2,'ledger.journal.post','journal_entry',$3,$4,$5::jsonb)",
+        [auth.schoolId,auth.userId,entryId,idempotencyKey,JSON.stringify({entryNumber,postingDate:input.postingDate,total:formatMinorUnitsKes(totals.totalMinor)})],
+      );
+      return {status:201,body};
+    });
+    res.status(result.status).json(result.body);
+  } catch(error) { next(error); }
+});
+
+app.get('/api/v1/ledger/journals', requireAuth, requirePermission('ledger.read'), async (req,res,next) => {
+  try {
+    const auth = authContext(req);
+    const from = typeof req.query.from === 'string' ? req.query.from : null;
+    const to = typeof req.query.to === 'string' ? req.query.to : null;
+    const rows = await withSchoolTransaction(auth.schoolId, async client => client.query(
+      `SELECT j.id,j.entry_number,j.posting_date,j.description,j.status,j.posted_at,
+              COALESCE(sum(l.debit),0)::text AS total_debit,
+              COALESCE(sum(l.credit),0)::text AS total_credit
+       FROM journal_entries j LEFT JOIN journal_lines l ON l.school_id=j.school_id AND l.journal_entry_id=j.id
+       WHERE j.school_id=$1 AND ($2::date IS NULL OR j.posting_date >= $2::date)
+         AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       GROUP BY j.id ORDER BY j.posting_date DESC,j.entry_number DESC LIMIT 500`,
+      [auth.schoolId,from,to],
+    ));
+    res.json({journals:rows.rows});
+  } catch(error) { next(error); }
+});
+
+const devJournalSchema = z.object({
+  schoolId: z.string().min(1).max(100),
+  currency: z.literal('KES'),
+  lines: z.array(z.object({accountId:z.string().min(1).max(100),debit:z.string().default('0.00'),credit:z.string().default('0.00'),memo:z.string().max(500).optional()})).min(2).max(500),
+});
+app.post('/api/v1/dev/validate-journal', (req,res) => {
+  if (process.env.NODE_ENV === 'production') { res.status(404).json({error:'Not found'}); return; }
+  const parsed = devJournalSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({error:'Invalid request',details:parsed.error.flatten()}); return; }
+  try {
+    const lines = parsed.data.lines.map(line=>({accountId:line.accountId,debitMinor:parseKesToMinorUnits(line.debit),creditMinor:parseKesToMinorUnits(line.credit),memo:line.memo}));
+    const result = validateJournal({schoolId:parsed.data.schoolId,currency:parsed.data.currency,lines});
+    res.status(200).json({valid:true,total:formatMinorUnitsKes(result.totalMinor),lineCount:result.lineCount,posted:false});
+  } catch(error) { res.status(422).json({valid:false,error:error instanceof Error?error.message:'Journal validation failed',posted:false}); }
+});
+
+app.use((_req,res) => { res.status(404).json({error:'Not found'}); });
+app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const code = (error as { code?: string })?.code;
+  if (code === '23505') { res.status(409).json({error:'A record with these unique details already exists.'}); return; }
+  if (code === '23503' || code === '23514' || code === '55000') { res.status(422).json({error:'The financial operation violates an accounting or data-integrity rule.'}); return; }
+  if (error instanceof Error && error.name === 'DatabaseUnavailableError') { res.status(503).json({error:'Database is not configured.'}); return; }
+  process.stderr.write(`ShuleLedger API error: ${error instanceof Error ? error.message : 'unknown error'}\n`);
+  res.status(500).json({error:'Internal server error.'});
 });
 
 const port = Number(process.env.PORT ?? 3001);
-if (process.env.NODE_ENV !== 'test') {
-  app.listen(port, () => {
-    process.stdout.write(`ShuleLedger foundation API listening on port ${port}\n`);
-  });
-}
+if (process.env.NODE_ENV !== 'test') app.listen(port, () => process.stdout.write(`ShuleLedger API listening on port ${port}\n`));
 export default app;
