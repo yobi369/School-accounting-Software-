@@ -198,6 +198,57 @@ app.post('/api/v1/auth/login', async (req, res, next) => {
 });
 
 
+
+app.get('/api/v1/auth/workspaces',requireAuth,async(req,res,next)=>{
+  try{
+    const auth=authContext(req);
+    const workspaces=await withSchoolTransaction(auth.schoolId,async client=>{
+      await client.query("SELECT set_config('app.user_id',$1,true)",[auth.userId]);
+      const result=await client.query(
+        `SELECT sc.id AS school_id,sc.name AS school_name,r.name AS role_name
+         FROM school_memberships m JOIN schools sc ON sc.id=m.school_id
+         JOIN roles r ON r.id=m.role_id AND r.school_id=m.school_id
+         WHERE m.user_id=$1 AND m.status='active' AND sc.status='active'
+         ORDER BY sc.name`,[auth.userId]);
+      return result.rows;
+    });
+    res.json({workspaces});
+  }catch(error){next(error);}
+});
+app.post('/api/v1/auth/switch-workspace',requireAuth,async(req,res,next)=>{
+  try{
+    const p=z.object({schoolId:z.string().uuid()}).safeParse(req.body);
+    if(!p.success){res.status(400).json({error:'Provide a valid school ID.'});return;}
+    const auth=authContext(req);const target=p.data.schoolId;
+    const membership=await withSchoolTransaction(auth.schoolId,async client=>{
+      await client.query("SELECT set_config('app.user_id',$1,true)",[auth.userId]);
+      const result=await client.query(
+        `SELECT sc.id AS school_id,sc.name AS school_name,r.id AS role_id,r.name AS role_name,u.email,u.full_name,u.must_change_password
+         FROM school_memberships m JOIN schools sc ON sc.id=m.school_id
+         JOIN roles r ON r.id=m.role_id AND r.school_id=m.school_id
+         JOIN users u ON u.id=m.user_id
+         WHERE m.school_id=$1 AND m.user_id=$2 AND m.status='active' AND sc.status='active' AND u.status='active'`,
+        [target,auth.userId]);
+      return result.rows[0] as {school_id:string;school_name:string;role_id:string;role_name:string;email:string;full_name:string;must_change_password:boolean}|undefined;
+    });
+    if(!membership){res.status(403).json({error:'You do not have active membership in that school.'});return;}
+    const rotated=await createSession(auth.userId,target);
+    const permissions=await withSchoolTransaction(target,async client=>{
+      await client.query("UPDATE auth_sessions SET revoked_at=now() WHERE id=$1 AND school_id=$2 AND revoked_at IS NULL",[auth.sessionId,auth.schoolId]);
+      const r=await client.query('SELECT permission_code FROM role_permissions WHERE role_id=$1 ORDER BY permission_code',[membership.role_id]);
+      await client.query(
+        "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id,metadata) VALUES ($1,$2,'auth.workspace.switch','school',$3,$4::jsonb)",
+        [target,auth.userId,target,JSON.stringify({fromSchoolId:auth.schoolId})]);
+      return r.rows.map(row=>String(row.permission_code));
+    });
+    res.json({
+      token:rotated.token,tokenType:'Bearer',expiresAt:rotated.expiresAt.toISOString(),
+      user:{id:auth.userId,email:membership.email,fullName:membership.full_name,mustChangePassword:membership.must_change_password},
+      school:{id:target,name:membership.school_name},role:membership.role_name,permissions,
+    });
+  }catch(error){next(error);}
+});
+
 app.post('/api/v1/auth/change-password', requireAuth, async (req,res,next) => {
   try {
     const parsed=z.object({currentPassword:z.string().min(1).max(200),newPassword:z.string().min(12).max(200)}).safeParse(req.body);
