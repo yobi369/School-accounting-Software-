@@ -715,7 +715,7 @@ operationsRouter.post('/accounting/years/:id/close',requirePermission('periods.m
            GROUP BY a.id ORDER BY a.code`,[auth.schoolId,id.data]);
         const openingLines:PostingLine[]=[];
         for(const row of balanceSheet.rows){
-          const net=BigInt(String(row.net).split('.')[0])*100n+BigInt((String(row.net).split('.')[1]??'00').padEnd(2,'0'));
+          const rawNet=String(row.net);const net=rawNet.startsWith('-')?-parseKesToMinorUnits(rawNet.slice(1)):parseKesToMinorUnits(rawNet);
           if(net>0n)openingLines.push({accountId:String(row.id),debit:amountString(net),credit:'0.00'});
           else if(net<0n)openingLines.push({accountId:String(row.id),debit:'0.00',credit:amountString(-net)});
         }
