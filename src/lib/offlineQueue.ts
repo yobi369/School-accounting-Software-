@@ -49,6 +49,17 @@ export async function removeOfflineMutation(id:string):Promise<void>{
   return transact('readwrite',(store,resolve,reject)=>{const r=store.delete(id);r.onsuccess=()=>resolve();r.onerror=()=>reject(r.error);});
 }
 export async function markOfflineConflict(id:string,reason:string):Promise<void>{
-  const all=await listOfflineMutations();const item=all.find(x=>x.clientMutationId===id);if(!item)return;
-  return transact('readwrite',(store,resolve,reject)=>{const r=store.put({...item,state:'conflict',conflictReason:reason});r.onsuccess=()=>resolve();r.onerror=()=>reject(r.error);});
+  // Read and update in one IndexedDB read-write transaction so a concurrent
+  // sync/list operation cannot overwrite a newer version of the queued draft.
+  return transact('readwrite',(store,resolve,reject)=>{
+    const read=store.get(id);
+    read.onerror=()=>reject(read.error);
+    read.onsuccess=()=>{
+      const item=read.result as QueuedMutation|undefined;
+      if(!item){resolve();return;}
+      const write=store.put({...item,state:'conflict',conflictReason:reason});
+      write.onsuccess=()=>resolve();
+      write.onerror=()=>reject(write.error);
+    };
+  });
 }
