@@ -49,6 +49,22 @@ jobs:
           diff -u <(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger -F '|' -Atc "SELECT name, checksum FROM schema_migrations ORDER BY name") <(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -F '|' -Atc "SELECT name, checksum FROM schema_migrations ORDER BY name")
           test "$(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -Atc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname IN ('accounts','journal_entries','journal_lines','students','fee_invoices','expenses') AND c.relrowsecurity AND c.relforcerowsecurity")" -eq 6
           test "$(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('schema_migrations','schools','accounts','journal_entries','journal_lines','students','fee_invoices','expenses')")" -eq 8
+      - name: Verify encrypted backup script and restore drill
+        env:
+          PGPASSWORD: postgres
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age
+          age-keygen -o /tmp/shuleledger-age-identity.txt 2>/tmp/age-keygen.log
+          chmod 600 /tmp/shuleledger-age-identity.txt
+          recipient="$(age-keygen -y /tmp/shuleledger-age-identity.txt)"
+          DATABASE_URL="$MIGRATIONS_DATABASE_URL" BACKUP_DIR=/tmp/shuleledger-backups BACKUP_AGE_RECIPIENT="$recipient" bash scripts/backup-db.sh
+          backup_file="$(find /tmp/shuleledger-backups -maxdepth 1 -type f -name '*.dump.age' -print -quit)"
+          test -n "$backup_file"
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE shuleledger_encrypted_restore"
+          BACKUP_FILE="$backup_file" RESTORE_DATABASE_URL=postgres://postgres:postgres@localhost:5432/shuleledger_encrypted_restore AGE_IDENTITY_FILE=/tmp/shuleledger-age-identity.txt CONFIRM_RESTORE_TARGET=disposable bash scripts/restore-drill.sh
+          test "$(psql -h localhost -U postgres -d shuleledger_encrypted_restore -Atc "SELECT count(*) FROM schema_migrations")" -gt 0
+          test "$(psql -h localhost -U postgres -d shuleledger_encrypted_restore -Atc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname='journal_entries' AND c.relrowsecurity AND c.relforcerowsecurity")" -eq 1
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
