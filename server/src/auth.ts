@@ -69,7 +69,7 @@ export async function authenticateRequest(req: Request): Promise<AuthContext | n
        JOIN roles r ON r.id = m.role_id AND r.school_id = s.school_id
        JOIN schools sc ON sc.id = s.school_id AND sc.status = 'active'
        WHERE s.school_id = $1 AND s.token_hash = $2
-         AND s.revoked_at IS NULL AND s.expires_at > now()
+         AND s.revoked_at IS NULL AND s.expires_at > now() AND s.created_at >= u.password_changed_at
        LIMIT 1`,
       [schoolId, hashToken(token)],
     );
