@@ -1,7 +1,9 @@
 import { afterAll, describe, expect, it } from 'vitest';
+import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { pool, withSchoolTransaction } from './db.js';
 import { authenticateRequest, createSession } from './auth.js';
+import { operationsRouter } from './operations.js';
 
 const enabled = Boolean(process.env.DATABASE_URL);
 describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
@@ -124,6 +126,124 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       await c.query("INSERT INTO journal_lines (school_id,journal_entry_id,account_id,line_number,debit,credit) VALUES ($1,$2,$3,1,100.00,0),($1,$2,$4,2,0,99.00)",[schoolA,unbalancedId,cashId,incomeId]);
       await c.query("UPDATE journal_entries SET status='posted' WHERE school_id=$1 AND id=$2",[schoolA,unbalancedId]);
     })).rejects.toThrow(/equal, positive debit and credit totals/);
+  });
+
+
+  it('runs fee collection and maker-checker expense workflows through the authenticated API', async () => {
+    const schoolId=randomUUID();
+    const userIds={requester:randomUUID(),approver:randomUUID(),payer:randomUUID()};
+    const roleIds={requester:randomUUID(),approver:randomUUID(),payer:randomUUID()};
+    const yearId=randomUUID(),periodId=randomUUID(),studentId=randomUUID();
+    const cashId=randomUUID(),receivableId=randomUUID(),payableId=randomUUID(),incomeId=randomUUID(),expenseAccountId=randomUUID();
+    const code='WF'+randomUUID().replaceAll('-','').slice(0,10).toUpperCase();
+    const permissionCodes=['fees.manage','receipts.create','expenses.create','expenses.approve','expenses.pay'];
+    await withSchoolTransaction(schoolId,async c=>{
+      await c.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[schoolId,'Workflow Integration School',code]);
+      for(const [kind,id] of Object.entries(userIds)){
+        await c.query('INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',[id,kind+'-'+code.toLowerCase()+'@example.test','test-hash',kind+' Workflow User']);
+      }
+      for(const [kind,id] of Object.entries(roleIds)){
+        await c.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[id,schoolId,kind]);
+        await c.query('INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,$4)',[schoolId,userIds[kind as keyof typeof userIds],id,'active']);
+      }
+      for(const permission of permissionCodes){
+        await c.query('INSERT INTO permissions (code,description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING',[permission,permission]);
+      }
+      const assignments=[
+        ['requester',['fees.manage','receipts.create','expenses.create','expenses.approve']],
+        ['approver',['expenses.approve','expenses.pay']],
+        ['payer',['expenses.pay']],
+      ] as const;
+      for(const [kind,codes] of assignments){
+        for(const permission of codes){
+          await c.query('INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING',[roleIds[kind],permission]);
+        }
+      }
+      await c.query('INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',[yearId,schoolId,'2026','2026-01-01','2026-12-31']);
+      await c.query('INSERT INTO accounting_periods (id,school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',[periodId,schoolId,yearId,'2026-01-01','2026-12-31']);
+      await c.query('INSERT INTO accounts (id,school_id,code,name,account_type) VALUES ($1,$2,$3,$4,$5),($6,$2,$7,$8,$9),($10,$2,$11,$12,$13),($14,$2,$15,$16,$17),($18,$2,$19,$20,$21)',[
+        cashId,schoolId,'1000','Cash','asset',
+        receivableId,'1200','Fees receivable','asset',
+        payableId,'2000','Accounts payable','liability',
+        incomeId,'4000','School fee income','income',
+        expenseAccountId,'5000','Administration expenses','expense',
+      ]);
+      await c.query('INSERT INTO students (id,school_id,admission_number,full_name) VALUES ($1,$2,$3,$4)',[studentId,schoolId,'WF-STUDENT-1','Workflow Test Student']);
+    });
+
+    const requesterSession=await createSession(userIds.requester,schoolId);
+    const approverSession=await createSession(userIds.approver,schoolId);
+    const payerSession=await createSession(userIds.payer,schoolId);
+    const app=express();app.use(express.json());app.use('/api/v1',operationsRouter);
+    const server=app.listen(0,'127.0.0.1');
+    try{
+      await new Promise<void>((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject);});
+      const address=server.address();
+      if(!address||typeof address==='string')throw new Error('Integration API server did not bind to a TCP port.');
+      const base='http://127.0.0.1:'+address.port;
+      const post=async(path:string,token:string,body:unknown,extra:Record<string,string>={})=>{
+        const response=await fetch(base+path,{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',...extra},body:JSON.stringify(body)});
+        return {status:response.status,body:await response.json() as Record<string,any>};
+      };
+
+      const invoiceResult=await post('/api/v1/fees/invoices',requesterSession.token,{
+        studentId,invoiceNumber:'WF-INV-001',academicYear:'2026',description:'Term fees',issuedOn:'2026-02-01',dueOn:'2026-02-15',amount:'1000.00',
+      });
+      expect(invoiceResult.status).toBe(201);
+      const invoiceId=invoiceResult.body.invoice.id as string;
+
+      const receiptBody={studentId,receiptNumber:'WF-RCT-001',receivedOn:'2026-02-05',amount:'400.00',paymentAccountId:cashId,paymentMethod:'cash',allocations:[{invoiceId,amount:'400.00'}]};
+      const receiptHeaders={'Idempotency-Key':'workflow-receipt-001'};
+      const receipt=await post('/api/v1/fees/receipts',requesterSession.token,receiptBody,receiptHeaders);
+      expect(receipt.status).toBe(201);
+      expect(receipt.body.receipt.status).toBe('posted');
+      const duplicate=await post('/api/v1/fees/receipts',requesterSession.token,receiptBody,receiptHeaders);
+      expect(duplicate.status).toBe(200);
+      expect(duplicate.body.duplicate).toBe(true);
+
+      const overAllocation=await post('/api/v1/fees/receipts',requesterSession.token,{
+        studentId,receiptNumber:'WF-RCT-OVER',receivedOn:'2026-02-06',amount:'700.00',paymentAccountId:cashId,paymentMethod:'cash',allocations:[{invoiceId,amount:'700.00'}],
+      },{'Idempotency-Key':'workflow-receipt-over'});
+      expect(overAllocation.status).toBe(422);
+      expect(overAllocation.body.error).toMatch(/outstanding balance/);
+
+      const expenseResult=await post('/api/v1/expenses',requesterSession.token,{
+        expenseNumber:'WF-EXP-001',expenseAccountId,category:'Supplies',description:'Classroom supplies',incurredOn:'2026-02-06',amount:'200.00',
+      });
+      expect(expenseResult.status).toBe(201);
+      const expenseId=expenseResult.body.expense.id as string;
+      const selfApproval=await post('/api/v1/expenses/'+expenseId+'/approve',requesterSession.token,{});
+      expect(selfApproval.status).toBe(403);
+      expect(selfApproval.body.error).toMatch(/requester cannot approve/);
+
+      const approval=await post('/api/v1/expenses/'+expenseId+'/approve',approverSession.token,{});
+      expect(approval.status).toBe(200);
+      expect(approval.body.expense.status).toBe('approved');
+      const approverSelfPayment=await post('/api/v1/expenses/'+expenseId+'/pay',approverSession.token,{paymentAccountId:cashId,paidOn:'2026-02-07'});
+      expect(approverSelfPayment.status).toBe(403);
+      expect(approverSelfPayment.body.error).toMatch(/approver cannot pay/);
+      const payment=await post('/api/v1/expenses/'+expenseId+'/pay',payerSession.token,{paymentAccountId:cashId,paidOn:'2026-02-07'});
+      expect(payment.status).toBe(200);
+      expect(payment.body.expense.status).toBe('paid');
+
+      const totals=await withSchoolTransaction(schoolId,async c=>{
+        const invoice=await c.query("SELECT status,amount::text FROM fee_invoices WHERE school_id=$1 AND id=$2",[schoolId,invoiceId]);
+        const allocation=await c.query("SELECT COALESCE(sum(amount),0)::text AS total FROM fee_receipt_allocations WHERE school_id=$1 AND invoice_id=$2",[schoolId,invoiceId]);
+        const receipts=await c.query("SELECT count(*)::int AS n FROM fee_receipts WHERE school_id=$1 AND receipt_number='WF-RCT-001'",[schoolId]);
+        const expense=await c.query("SELECT status,approved_by,paid_at,payment_journal_entry_id FROM expenses WHERE school_id=$1 AND id=$2",[schoolId,expenseId]);
+        const journals=await c.query("SELECT count(*)::int AS n FROM journal_entries WHERE school_id=$1 AND status='posted'",[schoolId]);
+        return {invoice:invoice.rows[0],allocation:allocation.rows[0],receipts:receipts.rows[0],expense:expense.rows[0],journals:journals.rows[0]};
+      });
+      expect(totals.invoice.status).toBe('part_paid');
+      expect(totals.allocation.total).toBe('400.00');
+      expect(totals.receipts.n).toBe(1);
+      expect(totals.expense.status).toBe('paid');
+      expect(totals.expense.paid_at).toBeTruthy();
+      expect(totals.expense.payment_journal_entry_id).toBeTruthy();
+      expect(totals.journals.n).toBe(4);
+    } finally {
+      await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
+    }
   });
 });
 
