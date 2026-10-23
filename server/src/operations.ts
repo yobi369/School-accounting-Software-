@@ -984,8 +984,9 @@ operationsRouter.get('/reports/income-statement',requirePermission('reports.read
      GROUP BY a.id ORDER BY a.account_type,a.code`,[auth.schoolId,dates.from,dates.to]));
   const signedMinor=(value:unknown):bigint=>{const raw=String(value??'0.00');const negative=raw.startsWith('-');const parsed=parseKesToMinorUnits(negative?raw.slice(1):raw);return negative?-parsed:parsed;};
   const rows=result.rows.map(r=>({...r,balance:amountString(r.account_type==='expense'?-signedMinor(r.balance):signedMinor(r.balance))}));
-  const totals=rows.reduce((acc,r)=>{const amount=signedMinor(r.balance);if(r.account_type==='income')acc.income+=amount;else acc.expenses+=amount;return acc;},{income:0n,expenses:0n});
-  res.json({report:'income-statement',currency:'KES',from:dates.from,to:dates.to,rows,totals:{income:amountString(totals.income),expenses:amountString(totals.expenses),surplus:amountString(totals.income-totals.expenses)}});
+  let incomeMinor=0n;let expensesMinor=0n;
+  for(const row of rows){const amount=signedMinor(row.balance);if(row.account_type==='income')incomeMinor+=amount;else expensesMinor+=amount;}
+  res.json({report:'income-statement',currency:'KES',from:dates.from,to:dates.to,rows,totals:{income:amountString(incomeMinor),expenses:amountString(expensesMinor),surplus:amountString(incomeMinor-expensesMinor)}});
 }));
 
 operationsRouter.get('/reports/fee-balances',requirePermission('reports.read'),wrap(async(req,res)=>{
