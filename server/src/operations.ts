@@ -360,6 +360,52 @@ operationsRouter.post('/bank/reconcile',requirePermission('bank.reconcile'),wrap
   }catch(error){if(!handleError(res,error))throw error;}
 }));
 
+
+const syncSchema=z.object({mutations:z.array(z.object({
+  clientMutationId:z.string().uuid(),
+  type:z.literal('expense.draft'),
+  payload:expenseSchema,
+})).min(1).max(50)});
+operationsRouter.post('/sync/push',requirePermission('expenses.create'),wrap(async(req,res)=>{
+  const parsed=syncSchema.safeParse(req.body);
+  if(!parsed.success){res.status(400).json({error:'Invalid offline sync batch.',details:parsed.error.flatten()});return;}
+  const auth=authContext(req);
+  const results=[];
+  for(const mutation of parsed.data.mutations){
+    const requestHash=createHash('sha256').update(JSON.stringify({type:mutation.type,payload:mutation.payload})).digest('hex');
+    try{
+      const outcome=await withSchoolTransaction(auth.schoolId,async c=>{
+        const existing=await c.query('SELECT request_hash,response_body,resource_id FROM offline_sync_receipts WHERE school_id=$1 AND client_mutation_id=$2 FOR UPDATE',[auth.schoolId,mutation.clientMutationId]);
+        if(existing.rowCount){
+          const row=existing.rows[0];
+          if(row.request_hash!==requestHash)return {status:'conflict',clientMutationId:mutation.clientMutationId,reason:'This mutation ID was already used for different content.'};
+          return {...(row.response_body as Record<string,unknown>),duplicate:true,clientMutationId:mutation.clientMutationId};
+        }
+        const d=mutation.payload;const amount=parseKesToMinorUnits(d.amount);
+        if(amount<=0n)return {status:'rejected',clientMutationId:mutation.clientMutationId,reason:'Expense amount must be greater than zero.'};
+        const account=await c.query("SELECT id FROM accounts WHERE school_id=$1 AND id=$2 AND account_type='expense' AND is_active=true",[auth.schoolId,d.expenseAccountId]);
+        if(!account.rowCount)return {status:'conflict',clientMutationId:mutation.clientMutationId,reason:'The selected expense account is no longer available.'};
+        const id=randomUUID();
+        await c.query(
+          "INSERT INTO expenses (id,school_id,expense_number,supplier_id,category,description,incurred_on,amount,status,requested_by,expense_account_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'draft',$9,$10)",
+          [id,auth.schoolId,d.expenseNumber,d.supplierId??null,d.category,d.description,d.incurredOn??new Date().toISOString().slice(0,10),amountString(amount),auth.userId,d.expenseAccountId]);
+        const response={status:'accepted',clientMutationId:mutation.clientMutationId,serverId:id,resourceType:'expense',serverState:'draft'};
+        await c.query(
+          'INSERT INTO offline_sync_receipts (school_id,client_mutation_id,request_hash,resource_type,resource_id,response_body,created_by) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)',
+          [auth.schoolId,mutation.clientMutationId,requestHash,'expense',id,JSON.stringify(response),auth.userId]);
+        await audit(c,auth.schoolId,auth.userId,'offline.expense.draft.sync','expense',id,{clientMutationId:mutation.clientMutationId});
+        return response;
+      });
+      results.push(outcome);
+    }catch(error){
+      const e=error as {code?:string};
+      if(e.code==='23505')results.push({status:'conflict',clientMutationId:mutation.clientMutationId,reason:'An expense with this reference already exists. Review it before retrying.'});
+      else throw error;
+    }
+  }
+  res.json({results,serverAcceptedOnly:true,message:'Offline sync creates drafts only. No financial posting occurs until an authorized online user reviews and submits the expense.'});
+}));
+
 operationsRouter.get('/reports/trial-balance',requirePermission('reports.read'),wrap(async(req,res)=>{
   const auth=authContext(req);const from=typeof req.query.from==='string'?req.query.from:null;const to=typeof req.query.to==='string'?req.query.to:null;
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
