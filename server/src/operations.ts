@@ -465,7 +465,7 @@ operationsRouter.post('/users',requirePermission('users.manage'),wrap(async(req,
       else{
         const {hashPassword}=await import('./auth.js');
         userId=randomUUID();
-        await c.query('INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',[userId,email,await hashPassword(d.password),d.fullName]);
+        await c.query('INSERT INTO users (id,email,password_hash,full_name,must_change_password) VALUES ($1,$2,$3,$4,true)',[userId,email,await hashPassword(d.password),d.fullName]);
       }
       await c.query("INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,'active')",[auth.schoolId,userId,role.rows[0].id]);
       await audit(c,auth.schoolId,auth.userId,'user.membership.create','user',userId,{role:d.role,email});
