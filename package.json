@@ -33,9 +33,12 @@
     "@vitejs/plugin-react": "^4.3.4",
     "tsx": "^4.19.2",
     "typescript": "~5.6.2",
-    "vite": "^6.0.5",
-    "vitest": "^2.1.8",
+    "vite": "^6.4.4",
+    "vitest": "^5.0.5",
     "@types/pg": "^8.11.10",
     "@types/pdfkit": "^0.13.9"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }
