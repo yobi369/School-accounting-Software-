@@ -26,6 +26,12 @@ app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok', service: 'shuleledger-api' });
 });
 
+app.get('/health',(_req,res)=>res.status(200).json({status:'ok'}));
+app.get('/ready',async(_req,res)=>{
+  try{await requirePool().query('SELECT 1');res.status(200).json({status:'ready'});}
+  catch{res.status(503).json({status:'not_ready'});}
+});
+
 app.get('/api/v1/status', (_req, res) => {
   res.status(200).json({
     name: 'ShuleLedger API',
