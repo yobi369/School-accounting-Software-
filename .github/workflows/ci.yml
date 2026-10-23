@@ -9,12 +9,35 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: shuleledger
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d shuleledger"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://shuleledger_app:shuleledger_ci@localhost:5432/shuleledger
+      MIGRATIONS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/shuleledger
+      NODE_ENV: test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
       - run: npm install
+      - name: Create least-privilege runtime role
+        run: PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger -v ON_ERROR_STOP=1 -c "CREATE ROLE shuleledger_app LOGIN PASSWORD 'shuleledger_ci' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;"
+      - name: Apply database migrations
+        run: npm run db:migrate
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
