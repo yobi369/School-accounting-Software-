@@ -9,6 +9,14 @@ import { formatMinorUnitsKes, parseKesToMinorUnits, validateJournal } from './do
 
 const app = express();
 const loginAttempts = new Map<string,{count:number;resetAt:number}>();
+let lastLoginAttemptSweep = 0;
+function sweepLoginAttempts(now:number):void {
+  if(now-lastLoginAttemptSweep<60_000 && loginAttempts.size<10_000)return;
+  lastLoginAttemptSweep=now;
+  for(const [key,value] of loginAttempts) if(value.resetAt<=now) loginAttempts.delete(key);
+  // Bound memory use even during distributed low-rate traffic.
+  while(loginAttempts.size>10_000){const oldest=loginAttempts.keys().next().value as string|undefined;if(!oldest)break;loginAttempts.delete(oldest);}
+}
 const minorToDecimal = (amount:bigint) => (amount/100n).toString()+'.'+(amount%100n).toString().padStart(2,'0');
 app.disable('x-powered-by');
 app.use(express.json({ limit: '300kb', strict: true }));
@@ -25,8 +33,6 @@ app.use((req, res, next) => {
 app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok', service: 'shuleledger-api' });
 });
-
-app.get('/health',(_req,res)=>res.status(200).json({status:'ok'}));
 app.get('/ready',async(_req,res)=>{
   try{await requirePool().query('SELECT 1');res.status(200).json({status:'ready'});}
   catch{res.status(503).json({status:'not_ready'});}
@@ -38,8 +44,8 @@ app.get('/api/v1/status', (_req, res) => {
     readiness: 'development',
     productionReady: false,
     databaseConfigured: Boolean(pool),
-    enabled: ['health-check', 'exact-decimal-validation', 'database-authentication', 'tenant-context', 'manual-journal-posting'],
-    notYetEnabled: ['complete-fee-workflows', 'expense-approval-workflows', 'bank-reconciliation', 'report-export', 'offline-sync', 'backup-recovery-verification'],
+    enabled: ['health-and-readiness-checks', 'exact-decimal-validation', 'database-authentication', 'tenant-context', 'role-permissions', 'fee-invoices-and-receipts', 'receipt-allocation', 'fee-waivers', 'expense-approval-and-payment', 'double-entry-journals', 'period-controls', 'budgets', 'bank-statement-import-and-reconciliation', '18-financial-reports', 'csv-xlsx-pdf-exports', 'offline-expense-drafts'],
+    limitedOrOperationallyUnverified: ['offline-sync-is-limited-to-expense-drafts', 'production-provider-backup-and-restore', 'external-penetration-testing', 'production-hosting-configuration', 'mpesa-and-kra-etims-integrations', 'multi-factor-authentication', 'sms-and-email-delivery'],
   });
 });
 
@@ -150,6 +156,7 @@ app.post('/api/v1/auth/login', async (req, res, next) => {
   try {
     const attemptKey=req.ip||'unknown';
     const now=Date.now();
+    sweepLoginAttempts(now);
     const prior=loginAttempts.get(attemptKey);
     if(!prior||prior.resetAt<=now) loginAttempts.set(attemptKey,{count:1,resetAt:now+15*60*1000});
     else if(prior.count>=15){res.status(429).json({error:'Too many sign-in attempts. Try again in 15 minutes.'});return;}

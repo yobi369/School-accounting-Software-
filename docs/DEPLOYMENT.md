@@ -25,6 +25,8 @@ Use a strong, temporary `BOOTSTRAP_TOKEN` in the server secret store. Send one a
 - [ ] Configure rate limiting at the edge, monitoring, alerting, log redaction and incident response.
 - [ ] Rotate/remove bootstrap secrets; provision users with unique initial passwords and confirm first-login change.
 - [ ] Test all role permissions and cross-school access attempts using two real test schools.
+- [ ] Verify `/health` and `/ready` monitoring behaviour, including an unavailable database and a failed migration.
+- [ ] Verify report date filters, balances, totals, CSV formula-injection handling, and XLSX/PDF output with independently calculated fixtures.
 - [ ] Reconcile fee invoices, receipts, allocations, waivers, journals and reports against independently calculated examples.
 - [ ] Run the encrypted backup and restore drill in the actual production provider, not only CI.
 - [ ] Test offline queue conflicts on mobile and shared devices; clear device storage at staff offboarding.
@@ -33,4 +35,4 @@ Use a strong, temporary `BOOTSTRAP_TOKEN` in the server secret store. Send one a
 
 ## Scope and limitations
 
-M-Pesa, KRA eTIMS, SMS/email delivery, full academic-term configuration, automated recurring billing, multi-factor authentication, and managed object-storage backup scheduling are not live integrations in this repository. CSV exports are provided; XLSX/PDF exports and a complete 18-report catalogue remain separate delivery items. Do not advertise the system as production-ready until those requirements and the operational checklist are completed and evidenced.
+M-Pesa, KRA eTIMS, SMS/email delivery, full academic-term configuration, automated recurring billing, multi-factor authentication, and managed object-storage backup scheduling are not live integrations in this repository. Offline operation currently queues expense drafts only; posting and other financial actions require connectivity. The health endpoint is a liveness check; use `/ready` for database readiness. The application exposes 18 report types with CSV, XLSX, and PDF export endpoints. These exports still require independent reconciliation against the ledger before live use. Do not advertise the system as production-ready until those requirements and the operational checklist are completed and evidenced.
