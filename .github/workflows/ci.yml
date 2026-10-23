@@ -41,6 +41,28 @@ jobs:
         run: PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger -v ON_ERROR_STOP=1 -c "CREATE ROLE shuleledger_app LOGIN PASSWORD 'shuleledger_ci' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;"
       - name: Apply database migrations
         run: npm run db:migrate
+      - name: Seed synthetic accounting records for recovery verification
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO schools (id,name,code) VALUES ('10000000-0000-4000-8000-000000000001','CI Recovery Fixture School','BACKUP-CI');
+          INSERT INTO users (id,email,password_hash,full_name) VALUES ('10000000-0000-4000-8000-000000000002','backup-fixture@example.test','test-hash','Backup Fixture User');
+          INSERT INTO roles (id,school_id,name) VALUES ('10000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','school_admin');
+          INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ('10000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000002','10000000-0000-4000-8000-000000000003','active');
+          INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ('10000000-0000-4000-8000-000000000004','10000000-0000-4000-8000-000000000001','2026','2026-01-01','2026-12-31');
+          INSERT INTO accounting_periods (id,school_id,financial_year_id,starts_on,ends_on) VALUES ('10000000-0000-4000-8000-000000000005','10000000-0000-4000-8000-000000000004','10000000-0000-4000-8000-000000000004','2026-01-01','2026-12-31');
+          INSERT INTO accounts (id,school_id,code,name,account_type) VALUES
+            ('10000000-0000-4000-8000-000000000006','10000000-0000-4000-8000-000000000001','1000','Cash','asset'),
+            ('10000000-0000-4000-8000-000000000007','10000000-0000-4000-8000-000000000001','4000','Fee income','income');
+          INSERT INTO students (id,school_id,admission_number,full_name) VALUES ('10000000-0000-4000-8000-000000000008','10000000-0000-4000-8000-000000000001','RECOVERY-001','Recovery Test Student');
+          INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,issued_on,due_on,amount,status) VALUES ('10000000-0000-4000-8000-000000000009','10000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000008','RECOVERY-INV-001','2026','Term fees','2026-01-01','2026-02-01',1250.00,'issued');
+          INSERT INTO fee_receipts (id,school_id,receipt_number,student_id,received_on,amount,payment_method,status) VALUES ('10000000-0000-4000-8000-00000000000a','10000000-0000-4000-8000-000000000001','RECOVERY-RCT-001','10000000-0000-4000-8000-000000000008','2026-01-15',500.00,'cash','posted');
+          INSERT INTO fee_receipt_allocations (school_id,receipt_id,invoice_id,amount) VALUES ('10000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-00000000000a','10000000-0000-4000-8000-000000000009',500.00);
+          INSERT INTO journal_entries (id,school_id,financial_year_id,period_id,entry_number,posting_date,description,status,source_type,created_by) VALUES ('10000000-0000-4000-8000-00000000000b','10000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000004','10000000-0000-4000-8000-000000000005',1,'2026-01-15','Recovery fixture posting','draft','backup-test','10000000-0000-4000-8000-000000000002');
+          INSERT INTO journal_lines (school_id,journal_entry_id,account_id,line_number,debit,credit) VALUES
+            ('10000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-00000000000b','10000000-0000-4000-8000-000000000006',1,500.00,0),
+            ('10000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-00000000000b','10000000-0000-4000-8000-000000000007',2,0,500.00);
+          UPDATE journal_entries SET status='posted' WHERE id='10000000-0000-4000-8000-00000000000b';
+          SQL
       - name: Verify database backup and restore
         run: |
           pg_dump --format=custom --no-owner --no-acl --dbname "$MIGRATIONS_DATABASE_URL" --file=/tmp/shuleledger-ci.dump
@@ -49,6 +71,7 @@ jobs:
           diff -u <(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger -F '|' -Atc "SELECT name, checksum FROM schema_migrations ORDER BY name") <(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -F '|' -Atc "SELECT name, checksum FROM schema_migrations ORDER BY name")
           test "$(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -Atc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname IN ('accounts','journal_entries','journal_lines','students','fee_invoices','expenses') AND c.relrowsecurity AND c.relforcerowsecurity")" -eq 6
           test "$(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('schema_migrations','schools','accounts','journal_entries','journal_lines','students','fee_invoices','expenses')")" -eq 8
+          diff -u <(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger -Atc "SELECT 'school='||count(*) FROM schools WHERE id='10000000-0000-4000-8000-000000000001' UNION ALL SELECT 'posted_journal='||count(*) FROM journal_entries WHERE id='10000000-0000-4000-8000-00000000000b' AND status='posted' UNION ALL SELECT 'journal_debits='||COALESCE(sum(debit),0)::text FROM journal_lines WHERE journal_entry_id='10000000-0000-4000-8000-00000000000b' UNION ALL SELECT 'receipt_allocations='||COALESCE(sum(amount),0)::text FROM fee_receipt_allocations WHERE receipt_id='10000000-0000-4000-8000-00000000000a'") <(PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger_restore -Atc "SELECT 'school='||count(*) FROM schools WHERE id='10000000-0000-4000-8000-000000000001' UNION ALL SELECT 'posted_journal='||count(*) FROM journal_entries WHERE id='10000000-0000-4000-8000-00000000000b' AND status='posted' UNION ALL SELECT 'journal_debits='||COALESCE(sum(debit),0)::text FROM journal_lines WHERE journal_entry_id='10000000-0000-4000-8000-00000000000b' UNION ALL SELECT 'receipt_allocations='||COALESCE(sum(amount),0)::text FROM fee_receipt_allocations WHERE receipt_id='10000000-0000-4000-8000-00000000000a'")
       - name: Verify encrypted backup script and restore drill
         env:
           PGPASSWORD: postgres
@@ -64,6 +87,8 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE shuleledger_encrypted_restore"
           BACKUP_FILE="$backup_file" RESTORE_DATABASE_URL=postgres://postgres:postgres@localhost:5432/shuleledger_encrypted_restore AGE_IDENTITY_FILE=/tmp/shuleledger-age-identity.txt CONFIRM_RESTORE_TARGET=disposable bash scripts/restore-drill.sh
           test "$(psql -h localhost -U postgres -d shuleledger_encrypted_restore -Atc "SELECT count(*) FROM schema_migrations")" -gt 0
+          test "$(psql -h localhost -U postgres -d shuleledger_encrypted_restore -Atc "SELECT count(*) FROM journal_entries WHERE id='10000000-0000-4000-8000-00000000000b' AND status='posted'")" -eq 1
+          test "$(psql -h localhost -U postgres -d shuleledger_encrypted_restore -Atc "SELECT COALESCE(sum(amount),0) FROM fee_receipt_allocations WHERE receipt_id='10000000-0000-4000-8000-00000000000a'")" = "500.00"
           test "$(psql -h localhost -U postgres -d shuleledger_encrypted_restore -Atc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname='journal_entries' AND c.relrowsecurity AND c.relforcerowsecurity")" -eq 1
       - name: Validate operational shell scripts
         run: bash -n scripts/backup-db.sh scripts/restore-drill.sh scripts/smoke-deployment.sh
