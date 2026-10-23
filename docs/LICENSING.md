@@ -12,11 +12,17 @@ ShuleLedger is being developed as a product for real Kenyan schools, with the op
 - Access to a test deployment, if one is offered later, will not by itself grant rights to the source code.
 - The root [LICENSE](../LICENSE) contains the current proprietary notice.
 
+## Repository visibility
+
+The repository is currently public. This proprietary notice does not hide source code or prevent downloading it. For source-code confidentiality, change the repository to private in GitHub repository settings before sharing a commercial product build or sensitive implementation details. If public visibility is intentionally retained for portfolio reasons, understand that licensing restrictions and practical secrecy are different controls. Check contributor access and remove any credentials or sensitive data from Git history before changing visibility or distributing builds.
+
 ## Third-party software
 
 ShuleLedger uses third-party packages and other materials. Each dependency remains subject to its own license. This project's proprietary notice does not override third-party licenses or claim ownership of their code. Before a commercial release, generate and review a dependency license inventory and confirm that every dependency's terms are compatible with the distribution model.
 
 ## Commercial licensing policy
+
+A non-binding starting-point template is provided in [COMMERCIAL_LICENSE_AGREEMENT_TEMPLATE.md](COMMERCIAL_LICENSE_AGREEMENT_TEMPLATE.md). It is not a signed contract and must be reviewed and adapted by a qualified Kenyan lawyer before use.
 
 Commercial terms should be agreed in writing before onboarding a paying school. The agreement should clearly identify:
 

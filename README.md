@@ -74,4 +74,4 @@ M-Pesa, KRA eTIMS, SMS/email delivery, managed backup scheduling, multi-factor a
 
 ## License
 
-Choose and add a license before distributing this repository publicly or commercially.
+**Proprietary — all rights reserved.** This repository is not open source. See [LICENSE](LICENSE), [licensing policy](docs/LICENSING.md), and the [commercial license agreement template](docs/COMMERCIAL_LICENSE_AGREEMENT_TEMPLATE.md). The repository is currently public, so source files can still be viewed or downloaded; public visibility does not grant reuse rights. Review third-party licenses before any distribution.
