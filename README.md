@@ -1,55 +1,73 @@
 # ShuleLedger — Kenyan School Accounting Platform
 
-A multi-school accounting platform for Kenyan primary and secondary schools, designed around accurate double-entry bookkeeping, fee collection, expense control, reconciliations, reporting, and dependable offline workflows.
+ShuleLedger is a school-finance workspace for Kenyan primary and secondary schools. It is built around double-entry accounting, fee collection, controlled expenses, cash/bank reconciliation, financial reporting, and school-level access controls.
 
-## Product principles
+## Implemented foundations
 
-- **Accounting integrity:** decimal money, balanced journals, immutable posted entries, reversal-only corrections.
-- **Tenant isolation:** school-scoped data and server-side authorization.
-- **Operational clarity:** fee balances, payables, cash and bank reconciliation, budgets, and reports.
-- **Offline-aware:** queued actions are explicitly pending until accepted by the server; no silent overwrites.
-- **Privacy:** least privilege, audit trails, protected backups, and data-minimization practices.
-- **Kenya-first:** KES default, configurable academic and financial calendars. M-Pesa, eTIMS, and SMS integrations are future work, not live V1 features.
+- React + TypeScript responsive workspace with sign-in, first-login password change, school workspace switching, and role management.
+- Node.js + Express API with password hashing, expiring bearer sessions, login throttling, security headers, server-side permissions, and cross-school membership checks.
+- PostgreSQL migrations with row-level security, school-scoped foreign keys, append-only audit events, idempotency records, immutable posted journals, reversal-only corrections, and transactional posting.
+- Student register, fee invoices and receipts, allocation checks, fee waivers, suppliers, expense approvals/payments, budgets, bank-statement CSV import/reconciliation, opening balances, period locking, and year-end close/opening-balance transfer.
+- 18 ledger-backed reports with CSV, XLSX, and PDF exports.
+- Installable PWA shell and durable IndexedDB queue for offline expense drafts. Offline drafts are pending, never posted, until server acceptance and approval.
+- GitHub Actions run PostgreSQL migrations, tenant/ledger integration tests, a disposable database dump/restore smoke test, TypeScript checks, and production builds.
 
-## Intended architecture
+## Technology
 
-- Web: React + TypeScript + Vite, responsive PWA.
-- API: Node.js + TypeScript + Express.
-- Database: PostgreSQL with migrations, constraints, and transactional journal posting.
-- Tests: Vitest, API/database integration tests, and Playwright.
-- CI: GitHub Actions.
-- Initial deployment: frontend and API deployed separately, managed PostgreSQL with verified backups.
-
-A modular monolith is preferred for the first release over microservices to reduce operational complexity and cost.
-
-## Delivery phases
-
-1. Foundation, school isolation, permissions, audit trail, double-entry ledger.
-2. Students, fee structures, invoices, receipts, allocations, waivers, statements.
-3. Expenses, suppliers, vouchers, petty cash, cash/bank books, imports and reconciliation.
-4. Budgets, opening balances, period/year-end controls, 18 reports and exports.
-5. Offline PWA, durable local queue, idempotent sync, conflict handling.
-6. Security hardening, restoration drills, performance testing, pilot and handover.
-
-## Important status
-
-This repository is the project starting point. Do not treat it as production-ready until implementation, automated tests, security review, database migration checks, backup restoration tests, and school-user acceptance tests have passed.
-
-## Accounting and security invariants
-
-- All monetary calculations use exact decimal arithmetic; never JavaScript floating-point for money.
-- A posted journal must balance and post atomically.
-- Posted journals are immutable; corrections use linked reversals.
-- Every school-owned query and mutation must enforce server-derived school membership.
-- Idempotency is required for retryable financial submissions.
-- Draft/pending/offline transactions must never be presented as server-confirmed postings.
-- Reports must reconcile to the posted ledger and source records.
-- Credentials and production secrets must only be supplied through environment variables.
+- Frontend: React, TypeScript, Vite.
+- API: Node.js, TypeScript, Express.
+- Database: PostgreSQL with RLS and versioned SQL migrations.
+- Tests: Vitest, including PostgreSQL integration checks in CI.
+- Deployment: single-origin Node container serving the built UI and API; managed PostgreSQL recommended.
 
 ## Local development
 
-Setup instructions will be expanded alongside the implementation. Never use real student or financial data in development fixtures.
+Requirements: Node.js 22+ and PostgreSQL 16+.
 
-## License and ownership
+```bash
+npm install
+cp .env.example .env
+# Configure DATABASE_URL, MIGRATIONS_DATABASE_URL and BOOTSTRAP_TOKEN.
+npm run db:migrate
+npm run dev
+```
 
-License and commercial distribution terms must be selected by the repository owner before public distribution.
+Run the API separately during local development:
+
+```bash
+npm run dev:api
+```
+
+For CI or a disposable PostgreSQL database, create a non-superuser runtime role named `shuleledger_app` with `NOBYPASSRLS`, apply migrations with the migration-owner connection, then run:
+
+```bash
+npm run typecheck
+npm test
+npm run build
+```
+
+For container deployment, see [Deployment and initial setup](docs/DEPLOYMENT.md). For encrypted backups and restore drills, see [Backups and recovery](docs/BACKUPS_AND_RECOVERY.md).
+
+## First school provisioning
+
+Provisioning requires a temporary strong `BOOTSTRAP_TOKEN`. Use `POST /api/v1/auth/bootstrap` with header `x-bootstrap-token` and a JSON body containing `schoolName`, `schoolCode`, `fullName`, `email`, and `password`. Store the returned school ID securely. Remove or rotate the bootstrap token after authorized provisioning.
+
+## Reports
+
+The report API supports: trial balance, income statement, balance sheet, general ledger, cashbook, bankbook, receipts register, invoice register, fee balances, fee ageing, expense register, supplier payables, bank reconciliation, budget variance, journal register, collections by payment method, fees by class, and audit trail. Export endpoints use `/api/v1/reports/{report}.csv`, `.xlsx`, or `.pdf`.
+
+## Production-readiness warning
+
+**Do not use live school financial records until the deployment operator has completed the production checklist and the school accountant has independently reconciled test cases.** Passing CI is necessary but not sufficient. In particular:
+
+- Run a restore drill with the actual production database provider and encrypted off-site backup destination.
+- Verify runtime grants and RLS using the exact non-superuser database role in the target hosting environment.
+- Configure edge rate limiting, TLS, monitoring, alerting, secrets management, backup scheduling, and retention.
+- Test all roles and cross-school access with two separate schools.
+- Pilot with synthetic data, then parallel-run against the existing books and obtain independent accounting sign-off.
+
+M-Pesa, KRA eTIMS, SMS/email delivery, managed backup scheduling, multi-factor authentication, and external accountant acceptance are not complete integrations. Offline support currently queues expense drafts only; other financial actions require connectivity. CSV/XLSX/PDF exports are supported, but export contents still require reconciliation against the source ledger during acceptance.
+
+## License
+
+Choose and add a license before distributing this repository publicly or commercially.
