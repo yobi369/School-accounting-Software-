@@ -11,7 +11,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.server.json --noEmit",
     "preview": "vite preview",
-    "db:migrate": "tsx scripts/migrate.ts",
+    "db:migrate": "node scripts/migrate.mjs",
     "start": "node dist-server/index.js",
     "build:api": "tsc -p tsconfig.server.json --noEmit false"
   },
