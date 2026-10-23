@@ -75,6 +75,7 @@ export async function authenticateRequest(req: Request): Promise<AuthContext | n
     );
     if (result.rowCount !== 1) return null;
     const row = result.rows[0] as { session_id: string; user_id: string; email: string; full_name: string; must_change_password:boolean; school_name: string; role_name: string };
+    await client.query("SELECT set_config('app.user_id',$1,true)",[row.user_id]);
     const permissions = await client.query(
       `SELECT rp.permission_code FROM school_memberships m
        JOIN role_permissions rp ON rp.role_id = m.role_id
