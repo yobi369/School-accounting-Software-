@@ -1,4 +1,4 @@
 {
-  "files": [],
-  "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.server.json" }]
+  "compilerOptions": { "target": "ES2022", "skipLibCheck": true, "strict": true },
+  "include": []
 }
