@@ -179,7 +179,8 @@ app.post('/api/v1/auth/login', async (req, res, next) => {
       res.status(401).json({ error: 'Invalid credentials or school membership.' });
       return;
     }
-    loginAttempts.delete(attemptKey);\n    const session = await createSession(user.id,schoolId);
+    loginAttempts.delete(attemptKey);
+    const session = await createSession(user.id,schoolId);
     await withSchoolTransaction(schoolId, async client => {
       await client.query(
         "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id) VALUES ($1,$2,'auth.login','user',$2)",
