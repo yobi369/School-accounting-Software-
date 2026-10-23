@@ -550,6 +550,45 @@ operationsRouter.put('/roles/:id/permissions',requirePermission('users.manage'),
   }catch(error){if(!handleError(res,error))throw error;}
 }));
 
+
+operationsRouter.put('/users/:id/role',requirePermission('users.manage'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);const p=z.object({role:z.string().trim().min(2).max(80)}).safeParse(req.body);
+  if(!id.success||!p.success){res.status(400).json({error:'Invalid membership role update.'});return;}
+  const auth=authContext(req);
+  try{
+    const result=await withSchoolTransaction(auth.schoolId,async c=>{
+      const membership=await c.query('SELECT m.role_id,r.name AS role_name FROM school_memberships m JOIN roles r ON r.id=m.role_id AND r.school_id=m.school_id WHERE m.school_id=$1 AND m.user_id=$2 AND m.status=\'active\' FOR UPDATE',[auth.schoolId,id.data]);
+      if(!membership.rowCount)throw Object.assign(new Error('Active school membership not found.'),{statusCode:404});
+      const next=await c.query('SELECT id FROM roles WHERE school_id=$1 AND name=$2',[auth.schoolId,p.data.role.toLowerCase()]);
+      if(!next.rowCount)throw Object.assign(new Error('Role not found in this school.'),{statusCode:422});
+      if(String(membership.rows[0].role_name)==='school_admin'&&p.data.role.toLowerCase()!=='school_admin'){
+        const count=await c.query("SELECT count(*)::int AS n FROM school_memberships m JOIN roles r ON r.id=m.role_id AND r.school_id=m.school_id WHERE m.school_id=$1 AND m.status='active' AND r.name='school_admin' AND m.user_id<>$2",[auth.schoolId,id.data]);
+        if(count.rows[0].n<1)throw Object.assign(new Error('Cannot remove the last active school administrator.'),{statusCode:409});
+      }
+      await c.query('UPDATE school_memberships SET role_id=$3 WHERE school_id=$1 AND user_id=$2',[auth.schoolId,id.data,next.rows[0].id]);
+      await audit(c,auth.schoolId,auth.userId,'user.role.update','user',id.data,{from:membership.rows[0].role_name,to:p.data.role});
+      return {userId:id.data,role:p.data.role.toLowerCase()};
+    });
+    res.json({membership:result});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+operationsRouter.post('/users/:id/reset-password',requirePermission('users.manage'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);const p=z.object({newPassword:z.string().min(12).max(200)}).safeParse(req.body);
+  if(!id.success||!p.success){res.status(400).json({error:'Provide a valid user ID and a password of at least 12 characters.'});return;}
+  const auth=authContext(req);if(id.data===auth.userId){res.status(422).json({error:'Use the change-password screen to change your own password.'});return;}
+  try{
+    const result=await withSchoolTransaction(auth.schoolId,async c=>{
+      const membership=await c.query("SELECT user_id FROM school_memberships WHERE school_id=$1 AND user_id=$2 AND status='active'",[auth.schoolId,id.data]);
+      if(!membership.rowCount)throw Object.assign(new Error('Active school membership not found.'),{statusCode:404});
+      const {hashPassword}=await import('./auth.js');
+      await c.query('UPDATE users SET password_hash=$2,must_change_password=true,password_changed_at=now() WHERE id=$1',[id.data,await hashPassword(p.data.newPassword)]);
+      await audit(c,auth.schoolId,auth.userId,'user.password.reset','user',id.data);
+      return {userId:id.data,mustChangePassword:true};
+    });
+    res.json({reset:result,message:'Password reset. Existing sessions across schools are invalidated; the user must change this password at next sign-in.'});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
 operationsRouter.get('/users',requirePermission('users.manage'),wrap(async(req,res)=>{
   const auth=authContext(req);
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
