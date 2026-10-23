@@ -347,6 +347,25 @@ operationsRouter.post('/bank/accounts/:id/import',requirePermission('bank.reconc
     res.status(200).json(result);
   }catch(error){if(!handleError(res,error))throw error;}
 }));
+
+operationsRouter.get('/bank/accounts/:id/match-candidates',requirePermission('bank.read'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid bank account ID.'});return;}
+  const auth=authContext(req);
+  const data=await withSchoolTransaction(auth.schoolId,async c=>{
+    const bank=await c.query('SELECT ledger_account_id FROM bank_accounts WHERE school_id=$1 AND id=$2',[auth.schoolId,id.data]);
+    if(!bank.rowCount)throw Object.assign(new Error('Bank account not found.'),{statusCode:404});
+    const statement=await c.query('SELECT id,transaction_date,description,reference,amount::text FROM bank_statement_lines WHERE school_id=$1 AND bank_account_id=$2 AND matched_at IS NULL ORDER BY transaction_date DESC LIMIT 500',[auth.schoolId,id.data]);
+    const ledger=await c.query(
+      `SELECT l.id,l.journal_entry_id,j.entry_number,j.posting_date,j.description,l.debit::text,l.credit::text,l.memo
+       FROM journal_lines l JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id
+       WHERE l.school_id=$1 AND l.account_id=$2 AND j.status='posted'
+       AND NOT EXISTS (SELECT 1 FROM bank_statement_lines b WHERE b.school_id=l.school_id AND b.matched_journal_line_id=l.id)
+       ORDER BY j.posting_date DESC,j.entry_number DESC LIMIT 1000`,[auth.schoolId,bank.rows[0].ledger_account_id]);
+    return {statementLines:statement.rows,journalLines:ledger.rows};
+  });
+  res.json(data);
+}));
+
 operationsRouter.get('/bank/accounts/:id/statement-lines',requirePermission('bank.read'),wrap(async(req,res)=>{
   const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid bank account ID.'});return;}
   const auth=authContext(req);const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
