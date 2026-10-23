@@ -233,6 +233,22 @@ operationsRouter.post('/expenses',requirePermission('expenses.create'),wrap(asyn
     res.status(201).json({expense});
   }catch(error){if(!handleError(res,error))throw error;}
 }));
+
+operationsRouter.post('/expenses/:id/submit',requirePermission('expenses.create'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid expense ID.'});return;}
+  const auth=authContext(req);
+  try{
+    const expense=await withSchoolTransaction(auth.schoolId,async c=>{
+      const found=await c.query('SELECT id,status FROM expenses WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,id.data]);
+      if(!found.rowCount||found.rows[0].status!=='draft')throw Object.assign(new Error('Only a synced draft can be submitted for approval.'),{statusCode:409});
+      await c.query("UPDATE expenses SET status='submitted' WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data]);
+      await audit(c,auth.schoolId,auth.userId,'expense.submit.synced_draft','expense',id.data);
+      return {id:id.data,status:'submitted'};
+    });
+    res.json({expense});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
 operationsRouter.post('/expenses/:id/approve',requirePermission('expenses.approve'),wrap(async(req,res)=>{
   const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid expense ID.'});return;}
   const auth=authContext(req);
