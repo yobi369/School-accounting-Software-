@@ -22,7 +22,7 @@ function audit(client: {query: (sql:string, values?:unknown[])=>Promise<unknown>
 }
 
 type PostingLine = { accountId?: string; accountCode?: string; debit: string; credit: string; memo?: string };
-async function postJournal(client: any, schoolId:string, userId:string, date:string, description:string, sourceType:string, sourceId:string, postingLines:PostingLine[]) {
+async function postJournal(client: any, schoolId:string, userId:string, date:string, description:string, sourceType:string, sourceId:string, postingLines:PostingLine[], reversalOfId?:string) {
   const period = await client.query(
     `SELECT y.id AS year_id,p.id AS period_id
      FROM financial_years y JOIN accounting_periods p
@@ -57,8 +57,8 @@ async function postJournal(client: any, schoolId:string, userId:string, date:str
   const entryId = randomUUID();
   const entryNumber = String(numberResult.rows[0].n);
   await client.query(
-    "INSERT INTO journal_entries (id,school_id,financial_year_id,period_id,entry_number,posting_date,description,status,source_type,source_id,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$9,$10)",
-    [entryId,schoolId,yearId,periodId,entryNumber,date,description,sourceType,sourceId,userId],
+    "INSERT INTO journal_entries (id,school_id,financial_year_id,period_id,entry_number,posting_date,description,status,source_type,source_id,created_by,reversal_of_id) VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$9,$10,$11)",
+    [entryId,schoolId,yearId,periodId,entryNumber,date,description,sourceType,sourceId,userId,reversalOfId??null],
   );
   for (const [i,line] of lines.entries()) {
     await client.query(
