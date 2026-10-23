@@ -424,6 +424,9 @@ operationsRouter.post('/sync/push',requirePermission('expenses.create'),wrap(asy
     const requestHash=createHash('sha256').update(JSON.stringify({type:mutation.type,payload:mutation.payload})).digest('hex');
     try{
       const outcome=await withSchoolTransaction(auth.schoolId,async c=>{
+        // Lock the idempotency key even when no receipt row exists yet. A row-level
+        // FOR UPDATE cannot serialize two concurrent first-time submissions.
+        await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[mutation.clientMutationId]);
         const existing=await c.query('SELECT request_hash,response_body,resource_id FROM offline_sync_receipts WHERE school_id=$1 AND client_mutation_id=$2 FOR UPDATE',[auth.schoolId,mutation.clientMutationId]);
         if(existing.rowCount){
           const row=existing.rows[0];
