@@ -406,6 +406,75 @@ operationsRouter.post('/sync/push',requirePermission('expenses.create'),wrap(asy
   res.json({results,serverAcceptedOnly:true,message:'Offline sync creates drafts only. No financial posting occurs until an authorized online user reviews and submits the expense.'});
 }));
 
+
+operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);
+  const data=await withSchoolTransaction(auth.schoolId,async c=>{
+    const fees=await c.query(
+      `SELECT COALESCE((SELECT sum(amount) FROM fee_receipts WHERE school_id=$1 AND status='posted'),0)::text AS collected,
+       COALESCE((SELECT sum(i.amount-COALESCE(a.allocated,0)) FROM fee_invoices i LEFT JOIN
+        (SELECT invoice_id,sum(a.amount) AS allocated FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND r.status='posted' GROUP BY invoice_id) a ON a.invoice_id=i.id
+        WHERE i.school_id=$1 AND i.status<>'void'),0)::text AS outstanding`,[auth.schoolId]);
+    const expenses=await c.query(
+      `SELECT count(*) FILTER (WHERE status='submitted')::int AS awaiting_approval,
+       count(*) FILTER (WHERE status='approved')::int AS approved_unpaid,
+       COALESCE(sum(amount) FILTER (WHERE status='paid'),0)::text AS paid_total FROM expenses WHERE school_id=$1`,[auth.schoolId]);
+    const bank=await c.query("SELECT count(*)::int AS unmatched FROM bank_statement_lines WHERE school_id=$1 AND matched_at IS NULL",[auth.schoolId]);
+    const journals=await c.query("SELECT count(*)::int AS posted_count FROM journal_entries WHERE school_id=$1 AND status='posted'",[auth.schoolId]);
+    return {fees:fees.rows[0],expenses:expenses.rows[0],unmatchedBankLines:bank.rows[0].unmatched,postedJournals:journals.rows[0].posted_count};
+  });
+  res.json({schoolId:auth.schoolId,summary:data});
+}));
+
+operationsRouter.get('/accounting/periods',requirePermission('ledger.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    `SELECT y.id AS financial_year_id,y.name AS financial_year_name,y.starts_on AS year_starts_on,y.ends_on AS year_ends_on,
+      p.id AS period_id,p.starts_on,p.ends_on,p.status
+     FROM financial_years y JOIN accounting_periods p ON p.school_id=y.school_id AND p.financial_year_id=y.id
+     WHERE y.school_id=$1 ORDER BY p.starts_on DESC LIMIT 100`,[auth.schoolId]));
+  res.json({periods:result.rows});
+}));
+
+operationsRouter.get('/audit-events',requirePermission('audit.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    'SELECT id,actor_user_id,action,entity_type,entity_id,request_id,metadata,created_at FROM audit_events WHERE school_id=$1 ORDER BY created_at DESC LIMIT 500',[auth.schoolId]));
+  res.json({events:result.rows});
+}));
+
+operationsRouter.get('/users',requirePermission('users.manage'),wrap(async(req,res)=>{
+  const auth=authContext(req);
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    `SELECT u.id,u.email,u.full_name,u.status,m.status AS membership_status,r.name AS role,m.created_at
+     FROM school_memberships m JOIN users u ON u.id=m.user_id JOIN roles r ON r.id=m.role_id AND r.school_id=m.school_id
+     WHERE m.school_id=$1 ORDER BY u.full_name LIMIT 500`,[auth.schoolId]));
+  res.json({users:result.rows});
+}));
+const userCreateSchema=z.object({fullName:z.string().trim().min(2).max(160),email:z.string().trim().email().max(254),role:z.enum(['school_admin','bursar','accountant','approver','auditor']),password:z.string().min(12).max(200)});
+operationsRouter.post('/users',requirePermission('users.manage'),wrap(async(req,res)=>{
+  const p=userCreateSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Invalid user details.',details:p.error.flatten()});return;}
+  const auth=authContext(req);const d=p.data;const email=d.email.toLowerCase();
+  try{
+    const result=await withSchoolTransaction(auth.schoolId,async c=>{
+      const role=await c.query('SELECT id FROM roles WHERE school_id=$1 AND name=$2',[auth.schoolId,d.role]);
+      if(!role.rowCount)throw Object.assign(new Error('Requested role is not configured for this school.'),{statusCode:422});
+      let user=await c.query('SELECT id FROM users WHERE lower(email)=lower($1)',[email]);
+      let userId:string;
+      if(user.rowCount){userId=String(user.rows[0].id);}
+      else{
+        const {hashPassword}=await import('./auth.js');
+        userId=randomUUID();
+        await c.query('INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',[userId,email,await hashPassword(d.password),d.fullName]);
+      }
+      await c.query("INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,'active')",[auth.schoolId,userId,role.rows[0].id]);
+      await audit(c,auth.schoolId,auth.userId,'user.membership.create','user',userId,{role:d.role,email});
+      return {id:userId,email,role:d.role,membershipStatus:'active',credentialsCreated:!user.rowCount};
+    });
+    res.status(201).json({user:result,message:result.credentialsCreated?'Account created. Share the initial password securely out of band; change-password enforcement should be enabled before production.':'Existing account added to this school; the existing password remains unchanged.'});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
 operationsRouter.get('/reports/trial-balance',requirePermission('reports.read'),wrap(async(req,res)=>{
   const auth=authContext(req);const from=typeof req.query.from==='string'?req.query.from:null;const to=typeof req.query.to==='string'?req.query.to:null;
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
