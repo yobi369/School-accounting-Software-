@@ -479,6 +479,57 @@ operationsRouter.get('/audit-events',requirePermission('audit.read'),wrap(async(
   res.json({events:result.rows});
 }));
 
+
+operationsRouter.get('/roles',requirePermission('users.manage'),wrap(async(req,res)=>{
+  const auth=authContext(req);
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    `SELECT r.id,r.name,COALESCE(json_agg(rp.permission_code) FILTER (WHERE rp.permission_code IS NOT NULL),'[]'::json) AS permissions
+     FROM roles r LEFT JOIN role_permissions rp ON rp.role_id=r.id
+     WHERE r.school_id=$1 GROUP BY r.id ORDER BY r.name`,[auth.schoolId]));
+  res.json({roles:result.rows});
+}));
+operationsRouter.get('/permissions',requirePermission('users.manage'),wrap(async(req,res)=>{
+  const auth=authContext(req);
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query('SELECT code,description FROM permissions ORDER BY code'));
+  res.json({permissions:result.rows});
+}));
+const roleSchema=z.object({name:z.string().trim().min(2).max(80).regex(/^[a-zA-Z0-9 _-]+$/),permissions:z.array(z.string().min(2).max(100)).min(1).max(100)});
+operationsRouter.post('/roles',requirePermission('users.manage'),wrap(async(req,res)=>{
+  const p=roleSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Invalid role details.',details:p.error.flatten()});return;}
+  const auth=authContext(req);const name=p.data.name.trim().toLowerCase();
+  try{
+    const role=await withSchoolTransaction(auth.schoolId,async c=>{
+      const codes=[...new Set(p.data.permissions)];
+      const known=await c.query('SELECT code FROM permissions WHERE code=ANY($1::text[])',[codes]);
+      if(known.rowCount!==codes.length)throw Object.assign(new Error('One or more permissions are unknown.'),{statusCode:422});
+      const id=randomUUID();await c.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[id,auth.schoolId,name]);
+      for(const code of codes)await c.query('INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,$2)',[id,code]);
+      await audit(c,auth.schoolId,auth.userId,'role.create','role',id,{name,permissions:codes});
+      return {id,name,permissions:codes};
+    });
+    res.status(201).json({role});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+operationsRouter.put('/roles/:id/permissions',requirePermission('users.manage'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);const p=z.object({permissions:z.array(z.string().min(2).max(100)).min(1).max(100)}).safeParse(req.body);
+  if(!id.success||!p.success){res.status(400).json({error:'Invalid role permission update.'});return;}
+  const auth=authContext(req);
+  try{
+    const role=await withSchoolTransaction(auth.schoolId,async c=>{
+      const found=await c.query('SELECT id,name FROM roles WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,id.data]);
+      if(!found.rowCount)throw Object.assign(new Error('Role not found in this school.'),{statusCode:404});
+      if(['school_admin','bursar','accountant','approver','auditor'].includes(String(found.rows[0].name)))throw Object.assign(new Error('Built-in roles cannot be redefined. Create a custom role instead.'),{statusCode:409});
+      const codes=[...new Set(p.data.permissions)];const known=await c.query('SELECT code FROM permissions WHERE code=ANY($1::text[])',[codes]);
+      if(known.rowCount!==codes.length)throw Object.assign(new Error('One or more permissions are unknown.'),{statusCode:422});
+      await c.query('DELETE FROM role_permissions WHERE role_id=$1',[id.data]);
+      for(const code of codes)await c.query('INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,$2)',[id.data,code]);
+      await audit(c,auth.schoolId,auth.userId,'role.permissions.update','role',id.data,{permissions:codes});
+      return {id:id.data,name:String(found.rows[0].name),permissions:codes};
+    });
+    res.json({role});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
 operationsRouter.get('/users',requirePermission('users.manage'),wrap(async(req,res)=>{
   const auth=authContext(req);
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
@@ -487,7 +538,7 @@ operationsRouter.get('/users',requirePermission('users.manage'),wrap(async(req,r
      WHERE m.school_id=$1 ORDER BY u.full_name LIMIT 500`,[auth.schoolId]));
   res.json({users:result.rows});
 }));
-const userCreateSchema=z.object({fullName:z.string().trim().min(2).max(160),email:z.string().trim().email().max(254),role:z.enum(['school_admin','bursar','accountant','approver','auditor']),password:z.string().min(12).max(200)});
+const userCreateSchema=z.object({fullName:z.string().trim().min(2).max(160),email:z.string().trim().email().max(254),role:z.string().trim().min(2).max(80),password:z.string().min(12).max(200)});
 operationsRouter.post('/users',requirePermission('users.manage'),wrap(async(req,res)=>{
   const p=userCreateSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Invalid user details.',details:p.error.flatten()});return;}
   const auth=authContext(req);const d=p.data;const email=d.email.toLowerCase();
