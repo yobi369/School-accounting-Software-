@@ -271,13 +271,21 @@ app.post('/api/v1/ledger/journals', requireAuth, requirePermission('ledger.post'
         "SELECT id FROM accounting_periods WHERE school_id=$1 AND id=$2 AND financial_year_id=$3 AND status='open' AND starts_on <= $4::date AND ends_on >= $4::date",
         [auth.schoolId,input.periodId,input.financialYearId,input.postingDate],
       );
-      if (!year.rowCount || !period.rowCount) return {status:422,body:{error:'Posting date must fall within an open financial year and its open accounting period.'}};
+      if (!year.rowCount || !period.rowCount) {
+        const body={error:'Posting date must fall within an open financial year and its open accounting period.'};
+        await client.query('UPDATE idempotency_records SET response_status=422,response_body=$3::jsonb WHERE school_id=$1 AND idempotency_key=$2',[auth.schoolId,idempotencyKey,JSON.stringify(body)]);
+        return {status:422,body};
+      }
       const accountIds = [...new Set(lines.map(line => line.accountId))];
       const accounts = await client.query(
         'SELECT id FROM accounts WHERE school_id=$1 AND is_active=true AND id=ANY($2::uuid[])',
         [auth.schoolId,accountIds],
       );
-      if (accounts.rowCount !== accountIds.length) return {status:422,body:{error:'One or more accounts are missing, inactive, or outside this school.'}};
+      if (accounts.rowCount !== accountIds.length) {
+        const body={error:'One or more accounts are missing, inactive, or outside this school.'};
+        await client.query('UPDATE idempotency_records SET response_status=422,response_body=$3::jsonb WHERE school_id=$1 AND idempotency_key=$2',[auth.schoolId,idempotencyKey,JSON.stringify(body)]);
+        return {status:422,body};
+      }
       const numberResult = await client.query(
         'SELECT COALESCE(MAX(entry_number),0)+1 AS next_number FROM journal_entries WHERE school_id=$1 AND financial_year_id=$2',
         [auth.schoolId,input.financialYearId],
