@@ -785,38 +785,168 @@ operationsRouter.get('/reports/fee-balances',requirePermission('reports.read'),w
   res.json({report:'fee-balances',currency:'KES',rows:result.rows});
 }));
 
-operationsRouter.get('/reports/:report.csv',requirePermission('reports.export'),wrap(async(req,res)=>{
-  const name=String(req.params.report);
-  if(!['trial-balance','income-statement','fee-balances'].includes(name)){res.status(404).json({error:'Report not found.'});return;}
-  const auth=authContext(req);const from=typeof req.query.from==='string'?req.query.from:null;const to=typeof req.query.to==='string'?req.query.to:null;
-  let rows:Record<string,unknown>[];
-  if(name==='trial-balance'){
-    const r=await withSchoolTransaction(auth.schoolId,c=>c.query(
-      `SELECT a.code,a.name,a.account_type,COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.debit ELSE 0 END),0)::text AS debit,COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.credit ELSE 0 END),0)::text AS credit
+
+const reportNames=['trial-balance','income-statement','balance-sheet','general-ledger','cashbook','bankbook','receipts-register','invoice-register','fee-balances','fee-aging','expense-register','supplier-payables','bank-reconciliation','budget-variance','journal-register','collections-by-method','fees-by-class','audit-trail'];
+async function buildReportRows(c:any,schoolId:string,name:string,from:string|null,to:string|null):Promise<Record<string,unknown>[]>{
+  let sql='';
+  let params:unknown[]=[schoolId,from,to];
+  switch(name){
+    case 'trial-balance':
+      sql=`SELECT a.code,a.name,a.account_type,
+       COALESCE(sum(l.debit) FILTER (WHERE j.id IS NOT NULL),0)::text AS debit,
+       COALESCE(sum(l.credit) FILTER (WHERE j.id IS NOT NULL),0)::text AS credit,
+       COALESCE(sum(l.debit-l.credit) FILTER (WHERE j.id IS NOT NULL),0)::text AS net
        FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
        LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
-        AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
-       WHERE a.school_id=$1 GROUP BY a.id ORDER BY a.code`,[auth.schoolId,from,to]));rows=r.rows;
-  }else if(name==='income-statement'){
-    const r=await withSchoolTransaction(auth.schoolId,c=>c.query(
-      `SELECT a.code,a.name,a.account_type,COALESCE(sum(l.credit-l.debit),0)::text AS balance
+       AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       WHERE a.school_id=$1 GROUP BY a.id ORDER BY a.code`;break;
+    case 'income-statement':
+      sql=`SELECT a.code,a.name,a.account_type,
+       COALESCE(sum(CASE WHEN j.id IS NOT NULL AND a.account_type='income' THEN l.credit-l.debit WHEN j.id IS NOT NULL THEN l.debit-l.credit ELSE 0 END),0)::text AS balance
        FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
        LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
-        AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
-       WHERE a.school_id=$1 AND a.account_type IN ('income','expense') GROUP BY a.id ORDER BY a.account_type,a.code`,[auth.schoolId,from,to]));rows=r.rows;
-  }else{
-    const r=await withSchoolTransaction(auth.schoolId,c=>c.query(
-      `SELECT s.admission_number,s.full_name,i.invoice_number,i.academic_year,i.due_on,i.amount::text,
-       COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)::text AS allocated,
-       (i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0))::numeric(14,2)::text AS outstanding
+       AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       WHERE a.school_id=$1 AND a.account_type IN ('income','expense') GROUP BY a.id ORDER BY a.account_type,a.code`;break;
+    case 'balance-sheet':
+      sql=`SELECT a.code,a.name,a.account_type,
+       COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.debit-l.credit ELSE 0 END),0)::text AS debit_net,
+       COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.credit-l.debit ELSE 0 END),0)::text AS credit_net
+       FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
+       LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
+       AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       WHERE a.school_id=$1 AND a.account_type IN ('asset','liability','equity') GROUP BY a.id ORDER BY a.account_type,a.code`;break;
+    case 'general-ledger':
+      sql=`SELECT j.entry_number,j.posting_date,j.description AS journal_description,a.code,a.name AS account_name,l.debit::text,l.credit::text,l.memo
+       FROM journal_entries j JOIN journal_lines l ON l.school_id=j.school_id AND l.journal_entry_id=j.id
+       JOIN accounts a ON a.school_id=l.school_id AND a.id=l.account_id
+       WHERE j.school_id=$1 AND j.status='posted' AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       ORDER BY j.posting_date,j.entry_number,l.line_number LIMIT 10000`;break;
+    case 'cashbook':
+    case 'bankbook':
+      sql=`SELECT j.posting_date,j.entry_number,j.description,a.code,a.name,l.debit::text,l.credit::text,l.memo
+       FROM journal_lines l JOIN accounts a ON a.id=l.account_id AND a.school_id=l.school_id
+       JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id
+       WHERE l.school_id=$1 AND j.status='posted' AND a.code=${name==='cashbook'?"'1000'":"'1100'"}
+       AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       ORDER BY j.posting_date,j.entry_number LIMIT 10000`;break;
+    case 'receipts-register':
+      sql=`SELECT r.receipt_number,r.received_on,s.admission_number,s.full_name AS student,r.amount::text,r.payment_method,r.external_reference,r.status
+       FROM fee_receipts r JOIN students s ON s.id=r.student_id AND s.school_id=r.school_id
+       WHERE r.school_id=$1 AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
+       ORDER BY r.received_on DESC,r.receipt_number LIMIT 5000`;break;
+    case 'invoice-register':
+      sql=`SELECT i.invoice_number,i.issued_on,i.due_on,s.admission_number,s.full_name AS student,i.academic_year,i.amount::text,i.status
        FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
-       LEFT JOIN fee_receipt_allocations a ON a.school_id=i.school_id AND a.invoice_id=i.id
-       LEFT JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
-       WHERE i.school_id=$1 AND i.status<>'void' GROUP BY i.id,s.id
-       HAVING i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)>0 ORDER BY i.due_on`,[auth.schoolId]));rows=r.rows;
+       WHERE i.school_id=$1 AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)
+       ORDER BY i.issued_on DESC,i.invoice_number LIMIT 5000`;break;
+    case 'fee-balances':
+      sql=`SELECT s.admission_number,s.full_name,i.invoice_number,i.academic_year,i.issued_on,i.due_on,i.amount::text,
+       COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
+       COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
+       (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
+       FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
+       WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)
+       ORDER BY i.due_on,s.full_name LIMIT 5000`;break;
+    case 'fee-aging':
+      sql=`SELECT s.admission_number,s.full_name,i.invoice_number,i.due_on,
+       (CURRENT_DATE-i.due_on)::int AS days_overdue,
+       (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
+       FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
+       WHERE i.school_id=$1 AND i.status<>'void' AND i.due_on<CURRENT_DATE
+       ORDER BY i.due_on,s.full_name LIMIT 5000`;break;
+    case 'expense-register':
+      sql=`SELECT e.expense_number,e.incurred_on,e.category,e.description,e.amount::text,e.status,s.name AS supplier
+       FROM expenses e LEFT JOIN suppliers s ON s.id=e.supplier_id AND s.school_id=e.school_id
+       WHERE e.school_id=$1 AND ($2::date IS NULL OR e.incurred_on >= $2::date) AND ($3::date IS NULL OR e.incurred_on <= $3::date)
+       ORDER BY e.incurred_on DESC,e.expense_number LIMIT 5000`;break;
+    case 'supplier-payables':
+      sql=`SELECT COALESCE(s.name,'Unspecified supplier') AS supplier,e.expense_number,e.description,e.incurred_on,e.amount::text,e.status
+       FROM expenses e LEFT JOIN suppliers s ON s.id=e.supplier_id AND s.school_id=e.school_id
+       WHERE e.school_id=$1 AND e.status='approved' ORDER BY e.incurred_on,e.expense_number LIMIT 5000`;break;
+    case 'bank-reconciliation':
+      sql=`SELECT b.name AS bank_account,l.transaction_date,l.description,l.reference,l.amount::text,l.matched_at,l.matched_journal_line_id
+       FROM bank_statement_lines l JOIN bank_accounts b ON b.id=l.bank_account_id AND b.school_id=l.school_id
+       WHERE l.school_id=$1 AND ($2::date IS NULL OR l.transaction_date >= $2::date) AND ($3::date IS NULL OR l.transaction_date <= $3::date)
+       ORDER BY l.transaction_date DESC LIMIT 5000`;break;
+    case 'budget-variance':
+      sql=`SELECT y.name AS financial_year,a.code,a.name AS account,b.name AS budget_name,b.budget_amount::text,
+       COALESCE((SELECT sum(l.debit-l.credit) FROM journal_lines l JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id WHERE l.school_id=b.school_id AND l.account_id=b.account_id AND j.financial_year_id=b.financial_year_id AND j.status='posted'),0)::text AS actual,
+       (b.budget_amount-COALESCE((SELECT sum(l.debit-l.credit) FROM journal_lines l JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id WHERE l.school_id=b.school_id AND l.account_id=b.account_id AND j.financial_year_id=b.financial_year_id AND j.status='posted'),0))::numeric(14,2)::text AS remaining,b.status
+       FROM budgets b JOIN financial_years y ON y.id=b.financial_year_id AND y.school_id=b.school_id JOIN accounts a ON a.id=b.account_id AND a.school_id=b.school_id
+       WHERE b.school_id=$1 ORDER BY y.starts_on DESC,a.code`;break;
+    case 'journal-register':
+      sql=`SELECT j.entry_number,j.posting_date,j.description,j.source_type,j.source_id,j.status,j.posted_at,
+       COALESCE(sum(l.debit),0)::text AS total_debit,COALESCE(sum(l.credit),0)::text AS total_credit
+       FROM journal_entries j LEFT JOIN journal_lines l ON l.school_id=j.school_id AND l.journal_entry_id=j.id
+       WHERE j.school_id=$1 AND j.status='posted' AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       GROUP BY j.id ORDER BY j.posting_date DESC,j.entry_number DESC LIMIT 5000`;break;
+    case 'collections-by-method':
+      sql=`SELECT payment_method,count(*)::int AS receipt_count,sum(amount)::text AS collected
+       FROM fee_receipts WHERE school_id=$1 AND status='posted' AND ($2::date IS NULL OR received_on >= $2::date) AND ($3::date IS NULL OR received_on <= $3::date)
+       GROUP BY payment_method ORDER BY payment_method`;break;
+    case 'fees-by-class':
+      sql=`SELECT COALESCE(s.class_name,'Unassigned') AS class_name,count(DISTINCT s.id)::int AS students,
+       COALESCE(sum(i.amount),0)::text AS invoiced
+       FROM students s LEFT JOIN fee_invoices i ON i.school_id=s.school_id AND i.student_id=s.id AND i.status<>'void'
+       WHERE s.school_id=$1 GROUP BY s.class_name ORDER BY s.class_name`;break;
+    case 'audit-trail':
+      sql=`SELECT created_at,actor_user_id,action,entity_type,entity_id,request_id,metadata
+       FROM audit_events WHERE school_id=$1 AND ($2::date IS NULL OR created_at::date >= $2::date) AND ($3::date IS NULL OR created_at::date <= $3::date)
+       ORDER BY created_at DESC LIMIT 5000`;break;
+    default: throw Object.assign(new Error('Report not found.'),{statusCode:404});
   }
-  const keys=rows.length?Object.keys(rows[0]):['no_data'];
-  const quote=(v:unknown)=>{const s=String(v??'');return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;};
-  const csv=[keys.map(quote).join(','),...rows.map(row=>keys.map(k=>quote(row[k])).join(','))].join('\r\n');
-  res.setHeader('Content-Type','text/csv; charset=utf-8');res.setHeader('Content-Disposition',`attachment; filename="${name}-${new Date().toISOString().slice(0,10)}.csv"`);res.status(200).send(csv);
+  const result=await c.query(sql,params);
+  return result.rows as Record<string,unknown>[];
+}
+function reportDateFilters(req:Request,res:Response):{from:string|null;to:string|null}|null{
+  const from=typeof req.query.from==='string'?req.query.from:null;
+  const to=typeof req.query.to==='string'?req.query.to:null;
+  if((from&&!/^\d{4}-\d{2}-\d{2}$/.test(from))||(to&&!/^\d{4}-\d{2}-\d{2}$/.test(to))){res.status(400).json({error:'Report dates must use YYYY-MM-DD.'});return null;}
+  if(from&&to&&from>to){res.status(400).json({error:'Report start date must not be after end date.'});return null;}
+  return {from,to};
+}
+operationsRouter.get('/reports/:report',requirePermission('reports.read'),wrap(async(req,res)=>{
+  const name=String(req.params.report);
+  if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
+  const dates=reportDateFilters(req,res);if(!dates)return;
+  const auth=authContext(req);
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to));
+  res.json({report:name,currency:'KES',from:dates.from,to:dates.to,rows});
 }));
+operationsRouter.get('/reports/:report.csv',requirePermission('reports.export'),wrap(async(req,res)=>{
+  const name=String(req.params.report);if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
+  const dates=reportDateFilters(req,res);if(!dates)return;const auth=authContext(req);
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to));
+  const keys=rows.length?Object.keys(rows[0]):['no_data'];
+  const quote=(v:unknown)=>{let value=String(v??'');if(/^[=+@-]/.test(value))value="'"+value;return /[",\r\n]/.test(value)?'"'+value.replace(/"/g,'""')+'"':value;};
+  const csv=[keys.map(quote).join(','),...rows.map(row=>keys.map(k=>quote(row[k])).join(','))].join('\r\n');
+  res.setHeader('Content-Type','text/csv; charset=utf-8');res.setHeader('Content-Disposition',`attachment; filename="${name}-${todayIso()}.csv"`);res.status(200).send(csv);
+}));
+operationsRouter.get('/reports/:report.xlsx',requirePermission('reports.export'),wrap(async(req,res)=>{
+  const name=String(req.params.report);if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
+  const dates=reportDateFilters(req,res);if(!dates)return;const auth=authContext(req);
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to));
+  const ExcelJS=await import('exceljs');const workbook=new ExcelJS.Workbook();const sheet=workbook.addWorksheet(name.slice(0,31));
+  const keys=rows.length?Object.keys(rows[0]):['no_data'];
+  sheet.columns=keys.map(key=>({header:labelsForReport(key),key,width:Math.min(32,Math.max(12,labelsForReport(key).length+4))}));
+  for(const row of rows)sheet.addRow(row);
+  sheet.getRow(1).font={bold:true,color:{argb:'FFFFFFFF'}};sheet.getRow(1).fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF174C3D'}};
+  sheet.views=[{state:'frozen',ySplit:1}];
+  const buffer=await workbook.xlsx.writeBuffer();
+  res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition',`attachment; filename="${name}-${todayIso()}.xlsx"`);res.status(200).send(Buffer.from(buffer));
+}));
+operationsRouter.get('/reports/:report.pdf',requirePermission('reports.export'),wrap(async(req,res)=>{
+  const name=String(req.params.report);if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
+  const dates=reportDateFilters(req,res);if(!dates)return;const auth=authContext(req);
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to));
+  const PdfDocument=(await import('pdfkit')).default;const doc=new PdfDocument({size:'A4',layout:'landscape',margin:32,bufferPages:true});
+  res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename="${name}-${todayIso()}.pdf"`);
+  doc.pipe(res);doc.fontSize(18).fillColor('#174c3d').text('ShuleLedger — '+name.replaceAll('-',' '));doc.moveDown(.4);
+  doc.fontSize(8).fillColor('#64766a').text('KES · Generated '+new Date().toISOString()+' · School '+auth.schoolName);doc.moveDown();
+  const keys=rows.length?Object.keys(rows[0]):['no_data'];const widths=keys.map(()=>Math.max(50,(doc.page.width-64)/keys.length));
+  const renderRow=(values:unknown[],header=false)=>{const y=doc.y;let x=32;values.forEach((v,i)=>{const w=widths[i];if(header)doc.rect(x,y,w,20).fill('#e7f0ea');doc.fillColor(header?'#174c3d':'#344d40').fontSize(header?7:6).text(String(v??'').slice(0,120),x+3,y+4,{width:w-6,height:18,ellipsis:true});x+=w;});doc.y=y+20;};
+  renderRow(keys.map(labelsForReport),true);for(const row of rows){if(doc.y>doc.page.height-45){doc.addPage();renderRow(keys.map(labelsForReport),true);}renderRow(keys.map(k=>row[k]));}
+  doc.end();
+}));
+function labelsForReport(key:string):string{return labels[key]??key.replaceAll('_',' ');}
