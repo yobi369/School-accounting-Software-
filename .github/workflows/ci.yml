@@ -65,6 +65,8 @@ jobs:
           BACKUP_FILE="$backup_file" RESTORE_DATABASE_URL=postgres://postgres:postgres@localhost:5432/shuleledger_encrypted_restore AGE_IDENTITY_FILE=/tmp/shuleledger-age-identity.txt CONFIRM_RESTORE_TARGET=disposable bash scripts/restore-drill.sh
           test "$(psql -h localhost -U postgres -d shuleledger_encrypted_restore -Atc "SELECT count(*) FROM schema_migrations")" -gt 0
           test "$(psql -h localhost -U postgres -d shuleledger_encrypted_restore -Atc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname='journal_entries' AND c.relrowsecurity AND c.relforcerowsecurity")" -eq 1
+      - name: Validate operational shell scripts
+        run: bash -n scripts/backup-db.sh scripts/restore-drill.sh scripts/smoke-deployment.sh
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
