@@ -817,12 +817,13 @@ operationsRouter.get('/reports/fee-balances',requirePermission('reports.read'),w
   const auth=authContext(req);const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
     `SELECT s.admission_number,s.full_name,i.invoice_number,i.academic_year,i.due_on,i.amount::text,
       COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)::text AS allocated,
-      (i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0))::numeric(14,2)::text AS outstanding
+      COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
+      (i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
      FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
      LEFT JOIN fee_receipt_allocations a ON a.school_id=i.school_id AND a.invoice_id=i.id
-     LEFT JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id AND r.status='posted'
+     LEFT JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
      WHERE i.school_id=$1 AND i.status<>'void'
-     GROUP BY i.id,s.id HAVING i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)>0
+     GROUP BY i.id,s.id HAVING i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>0
      ORDER BY i.due_on,s.full_name LIMIT 2000`,[auth.schoolId]));
   res.json({report:'fee-balances',currency:'KES',rows:result.rows});
 }));
