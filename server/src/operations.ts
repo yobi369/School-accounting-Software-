@@ -850,7 +850,7 @@ operationsRouter.post('/budgets',requirePermission('periods.manage'),wrap(async(
       const year=await c.query("SELECT id FROM financial_years WHERE school_id=$1 AND id=$2 AND status='open'",[auth.schoolId,d.financialYearId]);
       const account=await c.query("SELECT id,account_type FROM accounts WHERE school_id=$1 AND id=$2 AND is_active=true",[auth.schoolId,d.accountId]);
       if(!year.rowCount||!account.rowCount||account.rows[0].account_type!=='expense')throw Object.assign(new Error('Select an open financial year and active expense account.'),{statusCode:422});
-      const r=await c.query('INSERT INTO budgets (school_id,financial_year_id,account_id,name,budget_amount) VALUES ($1,$2,$3,$4,$5) RETURNING id,name,financial_year_id,account_id,budget_amount::text,status',[auth.schoolId,d.financialYearId,d.accountId,d.name,amountString(amount)]);
+      const r=await c.query('INSERT INTO budgets (school_id,financial_year_id,account_id,name,budget_amount,created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,name,financial_year_id,account_id,budget_amount::text,status',[auth.schoolId,d.financialYearId,d.accountId,d.name,amountString(amount),auth.userId]);
       await audit(c,auth.schoolId,auth.userId,'budget.create','budget',r.rows[0].id);
       return r.rows[0];
     });
@@ -862,8 +862,9 @@ operationsRouter.post('/budgets/:id/approve',requirePermission('periods.manage')
   const auth=authContext(req);
   try{
     const budget=await withSchoolTransaction(auth.schoolId,async c=>{
-      const r=await c.query("SELECT id,status FROM budgets WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
+      const r=await c.query("SELECT id,status,created_by FROM budgets WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
       if(!r.rowCount||r.rows[0].status!=='draft')throw Object.assign(new Error('Only a draft budget can be approved.'),{statusCode:409});
+      if(r.rows[0].created_by&&String(r.rows[0].created_by)===auth.userId)throw Object.assign(new Error('The budget creator cannot approve their own budget.'),{statusCode:403});
       await c.query("UPDATE budgets SET status='approved',approved_by=$3,approved_at=now() WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data,auth.userId]);
       await audit(c,auth.schoolId,auth.userId,'budget.approve','budget',id.data);
       return {id:id.data,status:'approved'};
