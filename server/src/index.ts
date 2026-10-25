@@ -45,17 +45,43 @@ app.get('/ready',async(_req,res)=>{
   catch{res.status(503).json({status:'not_ready'});}
 });
 
-app.get('/api/v1/status', (_req, res) => {
-  // This is an explicit operator attestation, not an automatic consequence of
-  // passing CI. Set it only after the production checklist and restore drill.
-  const productionReady = process.env.PRODUCTION_READINESS_ATTESTED === 'true' && Boolean(pool);
+app.get('/api/v1/status', async (_req, res) => {
+  // CI success or an environment flag alone must never attest production readiness.
+  // The live database role must also be non-privileged and own no application objects.
+  let runtimeDatabaseRoleVerified = false;
+  if (pool) {
+    try {
+      const roleCheck = await pool.query(`
+        SELECT r.rolsuper, r.rolbypassrls, r.rolcreatedb, r.rolcreaterole,
+          (SELECT count(*)::int FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+           WHERE n.nspname = 'public' AND c.relkind IN ('r','p','S','v','m','f')
+             AND c.relowner = r.oid) AS owned_objects
+        FROM pg_roles r WHERE r.rolname = current_user
+      `);
+      if (roleCheck.rowCount === 1) {
+        const role = roleCheck.rows[0] as {
+          rolsuper: boolean; rolbypassrls: boolean; rolcreatedb: boolean;
+          rolcreaterole: boolean; owned_objects: number;
+        };
+        runtimeDatabaseRoleVerified = !role.rolsuper && !role.rolbypassrls &&
+          !role.rolcreatedb && !role.rolcreaterole && Number(role.owned_objects) === 0;
+      }
+    } catch {
+      // Fail closed: status remains available, but production readiness stays false.
+      runtimeDatabaseRoleVerified = false;
+    }
+  }
+  const productionReady = process.env.PRODUCTION_READINESS_ATTESTED === 'true' &&
+    Boolean(pool) && runtimeDatabaseRoleVerified;
   res.status(200).json({
     name: 'ShuleLedger API',
     readiness: productionReady ? 'production-attested' : 'development',
     productionReady,
     databaseConfigured: Boolean(pool),
+    runtimeDatabaseRoleVerified,
     enabled: ['health-and-readiness-checks', 'exact-decimal-validation', 'database-authentication', 'tenant-context', 'role-permissions', 'fee-invoices-and-receipts', 'receipt-allocation', 'fee-waivers', 'expense-approval-and-payment', 'double-entry-journals', 'period-controls', 'budgets', 'bank-statement-import-and-reconciliation', '18-financial-reports', 'csv-xlsx-pdf-exports', 'offline-expense-drafts'],
-    limitedOrOperationallyUnverified: ['offline-sync-is-limited-to-expense-drafts', 'production-provider-backup-and-restore', 'external-penetration-testing', 'production-hosting-configuration', 'mpesa-and-kra-etims-integrations', 'multi-factor-authentication', 'sms-and-email-delivery'],
+    limitedOrOperationallyUnverified: ['offline-sync-is-limited-to-expense-drafts', 'login-rate-limit-is-process-local', 'production-provider-backup-and-restore', 'external-penetration-testing', 'production-hosting-configuration', 'mpesa-and-kra-etims-integrations', 'multi-factor-authentication', 'sms-and-email-delivery'],
   });
 });
 
