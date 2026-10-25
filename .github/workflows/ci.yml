@@ -52,6 +52,11 @@ jobs:
         run: PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger -v ON_ERROR_STOP=1 -c "CREATE ROLE shuleledger_app LOGIN PASSWORD 'shuleledger_ci' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;"
       - name: Apply database migrations
         run: npm run db:migrate
+      - name: Verify least-privilege runtime role setup
+        env:
+          RUNTIME_DATABASE_PASSWORD: disposable-ci-placeholder-password-2026
+          SHULELEDGER_ROLE_SETUP_ONLY: "true"
+        run: node scripts/start-render.mjs
       - name: Seed synthetic accounting records for recovery verification
         run: |
           PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger -v ON_ERROR_STOP=1 <<'SQL'
