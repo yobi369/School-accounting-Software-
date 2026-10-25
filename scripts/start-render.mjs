@@ -69,6 +69,12 @@ try {
     throw new Error('Runtime database role failed least-privilege verification; refusing to start.');
   }
 
+  if (process.env.SHULELEDGER_ROLE_SETUP_ONLY === 'true') {
+    await admin.end();
+    process.stdout.write('Least-privilege runtime role verified.\n');
+    process.exit(0);
+  }
+
   const runtimeUrl = new URL(migrationUrl);
   runtimeUrl.username = 'shuleledger_app';
   runtimeUrl.password = runtimePassword;
