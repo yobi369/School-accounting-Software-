@@ -98,7 +98,7 @@ function Login({onSuccess}:{onSuccess:(session:SchoolSession)=>void}){
   </section></main>;
   return <main className="sl-auth-shell"><section className="sl-auth-card">
     <div className="sl-brand-mark">S</div><p className="sl-eyebrow">KENYAN SCHOOL FINANCE</p><h1>Welcome to ShuleLedger</h1>
-    <p className="sl-muted">Sign in to your school workspace. Each school’s records are isolated on the server.</p>
+    <p className="sl-muted">Sign in with your school email and password. If you do not know the workspace ID, leave it blank for your primary school.</p>
     {setupNotice&&<div className="sl-notice"><strong>First school created</strong><p>{setupNotice}</p><code>{schoolId}</code></div>}
     <form onSubmit={async e=>{e.preventDefault();setBusy(true);setError('');try{
       const response=await fetch('/api/v1/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({schoolId,email,password})});
@@ -107,7 +107,7 @@ function Login({onSuccess}:{onSuccess:(session:SchoolSession)=>void}){
       const me=await apiRequest<{user:SchoolSession['user'];school:SchoolSession['school'];role:string;permissions:string[]}>('/auth/me',session);
       const full={...session,user:me.user,school:me.school,role:me.role,permissions:me.permissions};saveSession(full);onSuccess(full);
     }catch(err){setError(err instanceof Error?err.message:'Could not sign in.');}finally{setBusy(false);}}}>
-      <label>School workspace ID<input required value={schoolId} onChange={e=>setSchoolId(e.target.value.trim())} placeholder="UUID provided by your administrator"/></label>
+      <label>School workspace ID <span className="sl-muted">(optional for your primary school)</span><input value={schoolId} onChange={e=>setSchoolId(e.target.value.trim())} placeholder="Leave blank if you do not know it"/></label>
       <label>Email address<input required type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@school.ac.ke"/></label>
       <label>Password<input required type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)}/></label>
       {error&&<p className="sl-error">{error}</p>}
