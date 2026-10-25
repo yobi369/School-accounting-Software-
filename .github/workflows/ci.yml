@@ -57,6 +57,16 @@ jobs:
           RUNTIME_DATABASE_PASSWORD: disposable-ci-placeholder-password-2026
           SHULELEDGER_ROLE_SETUP_ONLY: "true"
         run: node scripts/start-render.mjs
+      - name: Assert runtime role cannot read operator-only metadata
+        run: |
+          if psql "$DATABASE_URL" -c "SELECT * FROM schema_migrations LIMIT 1" >/dev/null 2>&1; then
+            echo "Runtime role unexpectedly read schema_migrations."
+            exit 1
+          fi
+          if psql "$DATABASE_URL" -c "SELECT * FROM backup_restore_drills LIMIT 1" >/dev/null 2>&1; then
+            echo "Runtime role unexpectedly read backup_restore_drills."
+            exit 1
+          fi
       - name: Seed synthetic accounting records for recovery verification
         run: |
           PGPASSWORD=postgres psql -h localhost -U postgres -d shuleledger -v ON_ERROR_STOP=1 <<'SQL'
