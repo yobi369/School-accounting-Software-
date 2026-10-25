@@ -31,7 +31,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    command: ["node", "scripts/migrate.mjs"]
+    command: ["sh", "-c", "node scripts/migrate.mjs && node scripts/prepare-local-db.mjs"]
 
   app:
     build:
@@ -42,7 +42,7 @@ services:
       NODE_ENV: production
       PORT: "3001"
       DATABASE_URL: postgres://shuleledger_app:${SHULELEDGER_APP_PASSWORD}@db:5432/shuleledger
-      BOOTSTRAP_TOKEN: ${SHULELEDGER_BOOTSTRAP_TOKEN:?Set SHULELEDGER_BOOTSTRAP_TOKEN in .env}
+      BOOTSTRAP_TOKEN: ${SHULELEDGER_BOOTSTRAP_TOKEN:-}
       PRODUCTION_READINESS_ATTESTED: "false"
     ports:
       - "127.0.0.1:3001:3001"
