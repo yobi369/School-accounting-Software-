@@ -11,7 +11,9 @@ operationsRouter.use(requireAuth);
 
 function sqlDate(value:unknown):string {
   if(value instanceof Date){
-    return `${value.getFullYear()}-${String(value.getMonth()+1).padStart(2,'0')}-${String(value.getDate()).padStart(2,'0')}`;
+    // PostgreSQL DATE values may be parsed as UTC-midnight Date objects. Local
+    // getters can shift the calendar day on hosts configured outside UTC.
+    return `${value.getUTCFullYear()}-${String(value.getUTCMonth()+1).padStart(2,'0')}-${String(value.getUTCDate()).padStart(2,'0')}`;
   }
   return String(value).slice(0,10);
 }
