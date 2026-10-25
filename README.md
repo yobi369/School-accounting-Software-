@@ -10,7 +10,12 @@ ShuleLedger is a school-finance workspace for Kenyan primary and secondary schoo
 - Student register, fee invoices and receipts, allocation checks, fee waivers, suppliers, expense approvals/payments, budgets, bank-statement CSV import/reconciliation, opening balances, period locking, and year-end close/opening-balance transfer.
 - 18 ledger-backed reports with CSV, XLSX, and PDF exports.
 - Installable PWA shell and durable IndexedDB queue for offline expense drafts. Offline drafts are pending, never posted, until server acceptance and approval.
+- Local Docker Compose pilot for a laptop/desktop, using a local PostgreSQL volume and a separate non-superuser runtime role.
 - GitHub Actions run PostgreSQL migrations, tenant/ledger integration tests, a disposable database dump/restore smoke test, TypeScript checks, and production builds.
+
+## Try ShuleLedger on your own computer
+
+Follow the [Local Installation Guide](docs/LOCAL_INSTALLATION.md) to run a local instance on Windows, macOS, or Linux with Docker Compose. It is intended for synthetic-data testing. The local database is separate from the online Render pilot, and the current offline queue supports expense drafts only—not all accounting operations.
 
 ## Licensing
 
