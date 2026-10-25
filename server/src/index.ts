@@ -92,7 +92,14 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
       return;
     }
 
-    await withSchoolTransaction(schoolId, async client => {
+    const created = await withSchoolTransaction(schoolId, async client => {
+      // The singleton claim is transactional: concurrent bootstrap attempts serialize,
+      // and a failed school creation rolls the claim back automatically.
+      const claim = await client.query(
+        'INSERT INTO system_bootstrap_state (singleton, completed_at, school_id) VALUES (true, now(), $1) ON CONFLICT (singleton) DO NOTHING RETURNING singleton',
+        [schoolId],
+      );
+      if (claim.rowCount !== 1) return false;
       await client.query(
         'INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',
         [schoolId, input.schoolName.trim(), schoolCode],
@@ -150,8 +157,13 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
         "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id,metadata) VALUES ($1,$2,'school.bootstrap','school',$1,$3::jsonb)",
         [schoolId,userId,JSON.stringify({ schoolCode, email })],
       );
+      return true;
     });
-    res.status(201).json({ created: true, schoolId, message: 'School workspace created. Sign in with its school ID and the administrator credentials.' });
+    if (!created) {
+      res.status(409).json({ error: 'Initial school setup has already been completed. Use the school administrator invitation workflow to add users.' });
+      return;
+    }
+    res.status(201).json({ created: true, schoolId, message: 'School workspace created. Sign in with its school ID and administrator credentials.' });
   } catch (error) {
     next(error);
   }
