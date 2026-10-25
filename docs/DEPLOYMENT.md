@@ -8,11 +8,14 @@ Copy `.env.example` to a secure secret store, not into Git. Use a dedicated Post
 
 ## Migration and startup
 
-1. Create the PostgreSQL database and least-privilege application role.
-2. Configure `MIGRATIONS_DATABASE_URL` with the migration owner and `DATABASE_URL` with the runtime role.
-3. Run `npm run db:migrate` once as a release step before rolling out the new application version. The runner records checksums and refuses to silently change an applied migration.
-4. Build and run the container. It serves the static workspace and API from one origin; this is required for the current relative API URLs and CSP.
-5. Configure TLS at the ingress, an external rate limit/WAF, health monitoring, log redaction, database backups, and alerting. The in-process login throttle is only a secondary control, not a replacement for an edge rate limit. Keep `PRODUCTION_READINESS_ATTESTED=false` until the live HTTPS deployment, two-school authorization tests, encrypted provider backup/restore drill, and accountant acceptance checklist have passed. Only then set it to `true`; this is an explicit operator attestation and is checked by the production smoke test.
+The Render free-tier pilot currently receives the same owner connection in `DATABASE_URL` and `MIGRATIONS_DATABASE_URL` from the blueprint. The startup supervisor uses the migration connection only to apply checksum-verified migrations and provision/verify a separate `shuleledger_app` role using the generated `RUNTIME_DATABASE_PASSWORD`. It launches the API with only the restricted runtime connection; migration credentials and the generated role password are not passed to the API process. Startup fails closed if role creation, grants, or least-privilege verification fail. Operator-only `schema_migrations` and `backup_restore_drills` tables are not granted to the runtime role.
+
+For a production service, prefer a dedicated release/pre-deploy migration job and configure the service with a runtime-only `DATABASE_URL`; do not leave migration-owner credentials in the web service's environment.
+
+1. Apply migrations with the migration-owner credential. The runner records checksums and refuses to silently change an applied migration.
+2. Verify the application connects as `shuleledger_app`, which must have `NOSUPERUSER`, `NOBYPASSRLS`, no database/role creation privileges, and ownership of no application objects.
+3. Build and run the container. It serves the static workspace and API from one origin; this is required for the current relative API URLs and CSP.
+4. Configure TLS at the ingress, an external rate limit/WAF, health monitoring, log redaction, database backups, and alerting. The in-process login throttle is only a secondary control, not a replacement for an edge rate limit. Keep `PRODUCTION_READINESS_ATTESTED=false` until the live HTTPS deployment, two-school authorization tests, encrypted provider backup/restore drill, and accountant acceptance checklist have passed. Only then set it to `true`; this is a final operator attestation, not something CI can safely infer.
 
 ## Provision the first school
 
@@ -20,7 +23,7 @@ Use a strong, temporary `BOOTSTRAP_TOKEN` in the server secret store. Send one a
 
 ## Deployed-service verification
 
-After the container is deployed behind HTTPS, add the exact public application origin as the GitHub Actions repository variable `PRODUCTION_BASE_URL` (for example, `https://accounting.example.org`; do not include a path). The CI workflow then runs `scripts/smoke-deployment.sh` against the real service and requires healthy liveness, database readiness, configured database status, required security headers, and `productionReady: true`. Until that variable is configured and the smoke test passes, production deployment verification is **not evidenced**. A green repository build does not verify a live host, database credentials, DNS, TLS, or provider settings.
+After the container is deployed behind HTTPS, add the exact public application origin as the GitHub Actions repository variable `PRODUCTION_BASE_URL` (for example, `https://accounting.example.org`; do not include a path). CI then runs `scripts/smoke-deployment.sh` against the real service and checks liveness, database readiness, the least-privilege runtime role, and required security headers. The script intentionally does not require `productionReady: true` until the independent acceptance and recovery gates have passed. To enforce final attestation after those gates, run with `REQUIRE_PRODUCTION_ATTESTATION=true`. Until the URL is configured and the live smoke test passes, production deployment verification is **not evidenced**. A green repository build does not verify the live host, database credentials, DNS, TLS, or provider settings.
 
 ## Security and operational checklist
 
