@@ -55,7 +55,7 @@ docker compose ps
 docker compose logs --tail=100 app migrate
 ```
 
-Open http://localhost:3001 in a browser. The database is available only to the Compose network; the web app is bound to the local computer at 127.0.0.1.
+Open http://localhost:3001 in Chrome or Microsoft Edge. The database is available only to the Compose network; the web app is bound to the local computer at 127.0.0.1. To add an app-style shortcut, open the browser menu and choose **Install ShuleLedger** or **Install page as app** if offered. It will open in its own window; the local Docker services must still be running for accounting actions.
 
 If the app does not start, check the logs before retrying. To stop it without deleting local data, run `docker compose down`. To start it again, run `docker compose up -d`.
 
