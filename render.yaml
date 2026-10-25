@@ -18,6 +18,11 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /ready
+    # initialDeployHook runs only once, so later schema migrations can be missing.
+    # This free-tier pilot applies checksum-verified migrations before each start.
+    # For production, move migrations to a separate release/pre-deploy job and
+    # do not expose the migration-owner credential to the running web service.
+    dockerCommand: sh -c 'node scripts/migrate.mjs && node dist-server/index.js'
     initialDeployHook: npm run db:migrate
     envVars:
       - key: NODE_ENV
