@@ -51,6 +51,8 @@ try {
   await admin.query('GRANT USAGE ON SCHEMA public TO shuleledger_app');
   await admin.query('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO shuleledger_app');
   await admin.query('GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO shuleledger_app');
+  // These are operator-only metadata tables, not application data.
+  await admin.query('REVOKE ALL ON TABLE schema_migrations, backup_restore_drills FROM shuleledger_app');
 
   const defaults = await admin.query(
     "SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO shuleledger_app', current_user) AS sql",
