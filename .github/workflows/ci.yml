@@ -138,15 +138,26 @@ jobs:
           curl --fail --silent http://127.0.0.1:3001/api/v1/status | grep -q '"productionReady":false'
           token='replace-with-a-long-random-one-time-setup-token'
           first_code="$(curl --silent --show-error -o /tmp/shuleledger-bootstrap.json -w '%{http_code}' -X POST http://127.0.0.1:3001/api/v1/auth/bootstrap -H "x-bootstrap-token: $token" -H 'Content-Type: application/json' --data '{"schoolName":"CI Smoke School","schoolCode":"CI-SMOKE","fullName":"CI Test Administrator","email":"ci-admin@example.test","password":"CI-only-test-password-2026!"}')"
-          test "$first_code" = "201"
-          grep -q '"created":true' /tmp/shuleledger-bootstrap.json
+          if [ "$first_code" != "201" ] || ! grep -q '"created":true' /tmp/shuleledger-bootstrap.json; then
+            echo "First-school bootstrap failed: HTTP $first_code"
+            cat /tmp/shuleledger-bootstrap.json
+            docker compose --env-file .env.local.example logs --no-color --tail=100 app
+            exit 1
+          fi
           school_id="$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/tmp/shuleledger-bootstrap.json','utf8')).schoolId)")"
           second_code="$(curl --silent --show-error -o /tmp/shuleledger-bootstrap-second.json -w '%{http_code}' -X POST http://127.0.0.1:3001/api/v1/auth/bootstrap -H "x-bootstrap-token: $token" -H 'Content-Type: application/json' --data '{"schoolName":"Second CI School","schoolCode":"CI-SMOKE-2","fullName":"Second Administrator","email":"second-admin@example.test","password":"CI-only-test-password-2026!"}')"
-          test "$second_code" = "409"
-          grep -q 'Initial school setup has already been completed' /tmp/shuleledger-bootstrap-second.json
+          if [ "$second_code" != "409" ] || ! grep -q 'Initial school setup has already been completed' /tmp/shuleledger-bootstrap-second.json; then
+            echo "Second bootstrap was not safely rejected: HTTP $second_code"
+            cat /tmp/shuleledger-bootstrap-second.json
+            exit 1
+          fi
           login_code="$(curl --silent --show-error -o /tmp/shuleledger-login.json -w '%{http_code}' -X POST http://127.0.0.1:3001/api/v1/auth/login -H 'Content-Type: application/json' --data "{\"schoolId\":\"$school_id\",\"email\":\"ci-admin@example.test\",\"password\":\"CI-only-test-password-2026!\"}")"
-          test "$login_code" = "200"
-          grep -q '"mustChangePassword":true' /tmp/shuleledger-login.json
+          if [ "$login_code" != "200" ] || ! grep -q '"mustChangePassword":true' /tmp/shuleledger-login.json; then
+            echo "First administrator login failed: HTTP $login_code"
+            cat /tmp/shuleledger-login.json
+            docker compose --env-file .env.local.example logs --no-color --tail=100 app
+            exit 1
+          fi
           docker compose --env-file .env.local.example logs --no-color --tail=100 migrate app
       - name: Smoke-test configured production deployment
         if: vars.PRODUCTION_BASE_URL != ''
