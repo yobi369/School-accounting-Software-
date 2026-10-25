@@ -66,9 +66,40 @@ function DataTable({rows,empty='No records yet.'}:{rows:Row[];empty?:string}){
 function Login({onSuccess}:{onSuccess:(session:SchoolSession)=>void}){
   const [schoolId,setSchoolId]=useState('');const [email,setEmail]=useState('');const [password,setPassword]=useState('');
   const [busy,setBusy]=useState(false);const [error,setError]=useState('');
+  const [setupMode,setSetupMode]=useState(false);
+  const [setupToken,setSetupToken]=useState('');const [schoolName,setSchoolName]=useState('');const [schoolCode,setSchoolCode]=useState('');
+  const [fullName,setFullName]=useState('');const [setupEmail,setSetupEmail]=useState('');const [setupPassword,setSetupPassword]=useState('');
+  const [setupBusy,setSetupBusy]=useState(false);const [setupError,setSetupError]=useState('');const [setupNotice,setSetupNotice]=useState('');
+  const createFirstSchool=async(e:React.FormEvent<HTMLFormElement>)=>{
+    e.preventDefault();setSetupBusy(true);setSetupError('');setSetupNotice('');
+    try{
+      const response=await fetch('/api/v1/auth/bootstrap',{method:'POST',headers:{'Content-Type':'application/json','x-bootstrap-token':setupToken},body:JSON.stringify({schoolName,schoolCode,fullName,email:setupEmail,password:setupPassword})});
+      const body=await response.json();
+      if(!response.ok)throw new Error(body.error??'School setup failed.');
+      setSchoolId(String(body.schoolId));setEmail(setupEmail);setPassword(setupPassword);setSetupNotice('School created. Your School Workspace ID is shown below. Keep it safe; use these same email and password to sign in.');
+      setSetupMode(false);
+    }catch(err){setSetupError(err instanceof Error?err.message:'Could not create school.');}
+    finally{setSetupBusy(false);}
+  };
+  if(setupMode)return <main className="sl-auth-shell"><section className="sl-auth-card">
+    <div className="sl-brand-mark">S</div><p className="sl-eyebrow">ONE-TIME INITIAL SETUP</p><h1>Create your school workspace</h1>
+    <p className="sl-muted">For the first school only. You need the temporary BOOTSTRAP_TOKEN from the Render service environment. This does not reset an existing school.</p>
+    <form onSubmit={createFirstSchool}>
+      <label>Temporary setup token<input required type="password" autoComplete="off" value={setupToken} onChange={e=>setSetupToken(e.target.value)} /></label>
+      <label>School name<input required minLength={2} maxLength={160} value={schoolName} onChange={e=>setSchoolName(e.target.value)} placeholder="School's registered or working name"/></label>
+      <label>School code<input required minLength={2} maxLength={24} pattern="[A-Za-z0-9_-]+" value={schoolCode} onChange={e=>setSchoolCode(e.target.value.toUpperCase())} placeholder="e.g. VOI001"/></label>
+      <label>Administrator full name<input required minLength={2} maxLength={160} value={fullName} onChange={e=>setFullName(e.target.value)} /></label>
+      <label>Administrator email<input required type="email" maxLength={254} autoComplete="username" value={setupEmail} onChange={e=>setSetupEmail(e.target.value)} /></label>
+      <label>New password (12 characters minimum)<input required type="password" minLength={12} maxLength={200} autoComplete="new-password" value={setupPassword} onChange={e=>setSetupPassword(e.target.value)} /></label>
+      {setupError&&<p className="sl-error">{setupError}</p>}
+      <button className="sl-primary sl-full" disabled={setupBusy}>{setupBusy?'Creating workspace…':'Create first school'}</button>
+    </form>
+    <button className="sl-link" onClick={()=>{setSetupMode(false);setSetupError('');}}>Back to sign in</button>
+  </section></main>;
   return <main className="sl-auth-shell"><section className="sl-auth-card">
     <div className="sl-brand-mark">S</div><p className="sl-eyebrow">KENYAN SCHOOL FINANCE</p><h1>Welcome to ShuleLedger</h1>
     <p className="sl-muted">Sign in to your school workspace. Each school’s records are isolated on the server.</p>
+    {setupNotice&&<div className="sl-notice"><strong>First school created</strong><p>{setupNotice}</p><code>{schoolId}</code></div>}
     <form onSubmit={async e=>{e.preventDefault();setBusy(true);setError('');try{
       const response=await fetch('/api/v1/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({schoolId,email,password})});
       const body=await response.json();if(!response.ok)throw new Error(body.error??'Sign-in failed.');
@@ -82,6 +113,7 @@ function Login({onSuccess}:{onSuccess:(session:SchoolSession)=>void}){
       {error&&<p className="sl-error">{error}</p>}
       <button className="sl-primary sl-full" disabled={busy}>{busy?'Signing in…':'Sign in securely'}</button>
     </form>
+    <button className="sl-link" onClick={()=>{setSetupMode(true);setSetupError('');setSetupNotice('');}}>Set up the first school</button>
     <div className="sl-auth-foot"><span>🔒 Protected school workspace</span><span>Offline drafts stay pending until synced.</span></div>
   </section></main>;
 }
