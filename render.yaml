@@ -18,19 +18,17 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /ready
-    # initialDeployHook runs only once, so later schema migrations can be missing.
-    # This free-tier pilot applies checksum-verified migrations before each start.
-    # For production, move migrations to a separate release/pre-deploy job and
-    # do not expose the migration-owner credential to the running web service.
-    dockerCommand: sh -c 'node scripts/migrate.mjs && node dist-server/index.js'
+    # Apply immutable, checksum-verified migrations, create/verify a restricted
+    # runtime role, then launch the API without migration credentials in its env.
+    # For a paid production service, move migrations to a separate release job.
+    dockerCommand: node scripts/start-render.mjs
     initialDeployHook: npm run db:migrate
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
         value: "10000"
-      # Render ingress sits behind the platform proxy chain; confirm this hop count
-      # against the live request path before using req.ip for security decisions.
+      # Confirm the ingress hop count before using req.ip for security decisions.
       - key: TRUST_PROXY_HOPS
         value: "3"
       - key: DATABASE_URL
@@ -41,6 +39,8 @@ services:
         fromDatabase:
           name: shuleledger-db
           property: connectionString
+      - key: RUNTIME_DATABASE_PASSWORD
+        generateValue: true
       - key: BOOTSTRAP_TOKEN
         generateValue: true
       - key: PRODUCTION_READINESS_ATTESTED
