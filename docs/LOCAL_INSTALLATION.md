@@ -92,7 +92,7 @@ try {
 
 Save the returned `schoolId` privately. On the ShuleLedger sign-in screen, enter that value as the **School workspace ID**, plus the administrator email and the test password. Follow the first-login password-change prompt if shown.
 
-Once the test school has been created, remove `SHULELEDGER_BOOTSTRAP_TOKEN` from the `.env` file and recreate the app container with `docker compose up -d --force-recreate app`. Keep the token only if you deliberately need to provision another synthetic test school; rotate it before doing so.
+Once the test school has been created, remove `SHULELEDGER_BOOTSTRAP_TOKEN` from the `.env` file and recreate the app container with `docker compose up -d --force-recreate app`. Initial bootstrap is enforced as a one-time operation per database. Use the school administrator's invitation workflow to add authorized users; do not reuse bootstrap to create another school.
 
 ## 5. Verify basic operation
 
