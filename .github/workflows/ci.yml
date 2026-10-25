@@ -106,6 +106,10 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Validate local Docker Compose configuration
+        run: docker compose --env-file .env.local.example config --quiet
+      - name: Build application container
+        run: docker build --tag shuleledger:ci-smoke .
       - name: Smoke-test configured production deployment
         if: vars.PRODUCTION_BASE_URL != ''
         env:
