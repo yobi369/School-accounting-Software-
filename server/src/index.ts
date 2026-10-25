@@ -244,8 +244,8 @@ app.post('/api/v1/auth/login', async (req, res, next) => {
     const session = await createSession(user.id,schoolId);
     await withSchoolTransaction(schoolId, async client => {
       await client.query(
-        "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id) VALUES ($1,$2,'auth.login','user',$2)",
-        [schoolId,user.id],
+        "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id) VALUES ($1,$2,'auth.login','user',$3)",
+        [schoolId,user.id,user.id],
       );
     });
     res.status(200).json({
