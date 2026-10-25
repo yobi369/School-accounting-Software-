@@ -196,7 +196,7 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
 });
 
 const loginSchema = z.object({
-  schoolId: z.string().uuid(),
+  schoolId: z.string().uuid().optional().or(z.literal('')),
   email: z.string().trim().email().max(254),
   password: z.string().min(1).max(200),
 });
@@ -211,10 +211,11 @@ app.post('/api/v1/auth/login', async (req, res, next) => {
     else prior.count+=1;
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: 'Enter a valid school ID, email, and password.' });
+      res.status(400).json({ error: 'Enter a valid email and password, and check the school ID if you supplied one.' });
       return;
     }
-    const { schoolId, email, password } = parsed.data;
+    const { email, password } = parsed.data;
+    let schoolId = parsed.data.schoolId || '';
     const db = requirePool();
     const userResult = await db.query(
       "SELECT id,email,password_hash,full_name,status,must_change_password FROM users WHERE lower(email)=lower($1) LIMIT 1",
@@ -228,6 +229,20 @@ app.post('/api/v1/auth/login', async (req, res, next) => {
     if (user.status !== 'active' || !(await verifyPassword(password,user.password_hash))) {
       res.status(401).json({ error: 'Invalid credentials or school membership.' });
       return;
+    }
+    // Recover the initial workspace for users who no longer have the UUID.
+    // This global singleton is only used when no explicit workspace ID was supplied;
+    // actual membership is still checked inside the selected school's RLS context below.
+    if (!schoolId) {
+      const bootstrap = await db.query(
+        'SELECT school_id FROM system_bootstrap_state WHERE singleton = true LIMIT 1',
+      );
+      const recoveredSchoolId = bootstrap.rows[0]?.school_id;
+      if (typeof recoveredSchoolId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(recoveredSchoolId)) {
+        res.status(401).json({ error: 'Could not identify your primary school workspace. Ask your school administrator for its workspace ID.' });
+        return;
+      }
+      schoolId = recoveredSchoolId;
     }
     const membership = await withSchoolTransaction(schoolId, async client => {
       const result = await client.query(
