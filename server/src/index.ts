@@ -8,6 +8,13 @@ import { operationsRouter } from './operations.js';
 import { formatMinorUnitsKes, parseKesToMinorUnits, validateJournal } from './domain/ledger.js';
 
 const app = express();
+// Configure the known proxy hop count explicitly. Never trust arbitrary forwarded
+// headers from clients; local Docker runs directly with 0 trusted hops.
+const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS ?? '0');
+if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0 || trustProxyHops > 5) {
+  throw new Error('TRUST_PROXY_HOPS must be an integer between 0 and 5.');
+}
+app.set('trust proxy', trustProxyHops);
 const loginAttempts = new Map<string,{count:number;resetAt:number}>();
 let lastLoginAttemptSweep = 0;
 function sweepLoginAttempts(now:number):void {
