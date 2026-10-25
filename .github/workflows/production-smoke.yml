@@ -1,0 +1,29 @@
+name: Production smoke test
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/production-smoke.yml'
+      - 'scripts/smoke-deployment.sh'
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: shuleledger-production-smoke
+  cancel-in-progress: true
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Verify live deployment
+        env:
+          PRODUCTION_BASE_URL: https://shuleledger.onrender.com
+          REQUIRE_PRODUCTION_ATTESTATION: 'false'
+        run: bash scripts/smoke-deployment.sh
