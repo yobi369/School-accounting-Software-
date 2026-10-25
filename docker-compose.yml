@@ -1,0 +1,60 @@
+name: shuleledger-local
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: shuleledger
+      POSTGRES_USER: shuleledger_owner
+      POSTGRES_PASSWORD: ${SHULELEDGER_DB_OWNER_PASSWORD:?Set SHULELEDGER_DB_OWNER_PASSWORD in .env}
+      SHULELEDGER_APP_PASSWORD: ${SHULELEDGER_APP_PASSWORD:?Set SHULELEDGER_APP_PASSWORD in .env}
+    volumes:
+      - shuleledger_data:/var/lib/postgresql/data
+      - ./docker/init-app-role.sh:/docker-entrypoint-initdb.d/10-init-app-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shuleledger_owner -d shuleledger"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Deliberately not published to the host: access PostgreSQL through the app network only.
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://shuleledger_owner:${SHULELEDGER_DB_OWNER_PASSWORD}@db:5432/shuleledger
+      MIGRATIONS_DATABASE_URL: postgres://shuleledger_owner:${SHULELEDGER_DB_OWNER_PASSWORD}@db:5432/shuleledger
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["node", "scripts/migrate.mjs"]
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      DATABASE_URL: postgres://shuleledger_app:${SHULELEDGER_APP_PASSWORD}@db:5432/shuleledger
+      BOOTSTRAP_TOKEN: ${SHULELEDGER_BOOTSTRAP_TOKEN:?Set SHULELEDGER_BOOTSTRAP_TOKEN in .env}
+      PRODUCTION_READINESS_ATTESTED: "false"
+    ports:
+      - "127.0.0.1:3001:3001"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  shuleledger_data:
