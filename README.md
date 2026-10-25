@@ -55,7 +55,7 @@ npm test
 npm run build
 ```
 
-For container deployment, see [Deployment and initial setup](docs/DEPLOYMENT.md). For encrypted backups and restore drills, see [Backups and recovery](docs/BACKUPS_AND_RECOVERY.md).
+For container deployment, see [Deployment and initial setup](docs/DEPLOYMENT.md). For encrypted backups and restore drills, see [Backups and recovery](docs/BACKUPS_AND_RECOVERY.md). Before any real-world rollout, complete the independent [school acceptance test](docs/SCHOOL_ACCEPTANCE_TEST.md).
 
 ## First school provisioning
 
