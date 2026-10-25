@@ -40,7 +40,7 @@ try {
   // disposable test password so the existing smoke-test client can connect.
   if (process.env.SHULELEDGER_ROLE_SETUP_ONLY !== 'true') {
     const alter = await admin.query(
-      "SELECT format('ALTER ROLE shuleledger_app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD %L', $1) AS sql",
+      "SELECT format('ALTER ROLE shuleledger_app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD %L', $1::text) AS sql",
       [runtimePassword],
     );
     await admin.query(alter.rows[0].sql);
