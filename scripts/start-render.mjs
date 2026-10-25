@@ -72,9 +72,13 @@ try {
   const runtimeUrl = new URL(migrationUrl);
   runtimeUrl.username = 'shuleledger_app';
   runtimeUrl.password = runtimePassword;
+  const childEnv = { ...process.env, DATABASE_URL: runtimeUrl.toString() };
+  // Do not pass migration-owner credentials or the runtime password into the API process.
+  delete childEnv.MIGRATIONS_DATABASE_URL;
+  delete childEnv.RUNTIME_DATABASE_PASSWORD;
   const child = spawnSync(process.execPath, ['dist-server/index.js'], {
     stdio: 'inherit',
-    env: { ...process.env, DATABASE_URL: runtimeUrl.toString() },
+    env: childEnv,
   });
   process.exit(child.status ?? 1);
 } finally {
