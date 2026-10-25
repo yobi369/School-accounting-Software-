@@ -38,15 +38,14 @@ try {
 
   // Reassert least-privilege attributes. CI setup-only mode preserves its known
   // disposable test password so the existing smoke-test client can connect.
-  if (process.env.SHULELEDGER_ROLE_SETUP_ONLY !== 'true') {
-    const alter = await admin.query(
-      "SELECT format('ALTER ROLE shuleledger_app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD %L', $1::text) AS sql",
-      [runtimePassword],
-    );
-    await admin.query(alter.rows[0].sql);
-  } else {
-    await admin.query('ALTER ROLE shuleledger_app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS');
-  }
+  // Render's managed database role cannot change another role's SUPERUSER
+  // attribute, even to set NOSUPERUSER. Set only the password here; attributes
+  // are set on CREATE ROLE and independently verified below.
+  const alter = await admin.query(
+    "SELECT format('ALTER ROLE shuleledger_app WITH PASSWORD %L', $1::text) AS sql",
+    [process.env.SHULELEDGER_ROLE_SETUP_ONLY === 'true' ? runtimePassword : runtimePassword],
+  );
+  await admin.query(alter.rows[0].sql);
   await admin.query('GRANT CONNECT ON DATABASE ' + quoteIdentifier((await admin.query('SELECT current_database() AS name')).rows[0].name) + ' TO shuleledger_app');
   await admin.query('GRANT USAGE ON SCHEMA public TO shuleledger_app');
   await admin.query('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO shuleledger_app');
