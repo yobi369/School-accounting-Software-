@@ -18,5 +18,6 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shuleledger_app') THEN
     -- The runtime can claim the singleton but cannot read, change, or delete it.
     GRANT INSERT ON system_bootstrap_state TO shuleledger_app;
+    GRANT SELECT (singleton) ON system_bootstrap_state TO shuleledger_app;
   END IF;
 END $$;
