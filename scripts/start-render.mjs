@@ -36,12 +36,17 @@ try {
     await admin.query('CREATE ROLE shuleledger_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS');
   }
 
-  // Reassert least-privilege attributes and rotate the generated password on startup.
-  const alter = await admin.query(
-    "SELECT format('ALTER ROLE shuleledger_app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD %L', $1) AS sql",
-    [runtimePassword],
-  );
-  await admin.query(alter.rows[0].sql);
+  // Reassert least-privilege attributes. CI setup-only mode preserves its known
+  // disposable test password so the existing smoke-test client can connect.
+  if (process.env.SHULELEDGER_ROLE_SETUP_ONLY !== 'true') {
+    const alter = await admin.query(
+      "SELECT format('ALTER ROLE shuleledger_app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD %L', $1) AS sql",
+      [runtimePassword],
+    );
+    await admin.query(alter.rows[0].sql);
+  } else {
+    await admin.query('ALTER ROLE shuleledger_app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS');
+  }
   await admin.query('GRANT CONNECT ON DATABASE ' + quoteIdentifier((await admin.query('SELECT current_database() AS name')).rows[0].name) + ' TO shuleledger_app');
   await admin.query('GRANT USAGE ON SCHEMA public TO shuleledger_app');
   await admin.query('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO shuleledger_app');
