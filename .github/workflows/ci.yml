@@ -110,6 +110,33 @@ jobs:
         run: docker compose --env-file .env.local.example config --quiet
       - name: Build application container
         run: docker build --tag shuleledger:ci-smoke .
+      - name: Boot local Compose stack and smoke-test API
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker compose --env-file .env.local.example down -v --remove-orphans || true
+          }
+          trap cleanup EXIT
+          docker compose --env-file .env.local.example up -d --build
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3001/ready >/tmp/shuleledger-ready.json; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            docker compose --env-file .env.local.example ps
+            docker compose --env-file .env.local.example logs --no-color --tail=200 db migrate app
+            exit 1
+          fi
+          grep -q '"status":"ready"' /tmp/shuleledger-ready.json
+          curl --fail --silent http://127.0.0.1:3001/health | grep -q '"status":"ok"'
+          curl --fail --silent http://127.0.0.1:3001/api/v1/status | grep -q '"databaseConfigured":true'
+          curl --fail --silent http://127.0.0.1:3001/api/v1/status | grep -q '"productionReady":false'
+          docker compose --env-file .env.local.example logs --no-color --tail=100 migrate app
       - name: Smoke-test configured production deployment
         if: vars.PRODUCTION_BASE_URL != ''
         env:
