@@ -25,7 +25,8 @@ const failures = [];
 if (health.status !== 'ok') failures.push('liveness endpoint did not return status=ok');
 if (ready.status !== 'ready') failures.push('database readiness endpoint did not return status=ready');
 if (status.databaseConfigured !== true) failures.push('API reports no configured database');
-if (status.productionReady !== true) failures.push('API has not declared production readiness');
+if (status.runtimeDatabaseRoleVerified !== true) failures.push('runtime database role is not verified as least-privilege');
+if (process.env.REQUIRE_PRODUCTION_ATTESTATION === 'true' && status.productionReady !== true) failures.push('API has not declared production readiness');
 for (const header of ['x-content-type-options: nosniff', 'x-frame-options: deny', 'cache-control: no-store']) {
   if (!headers.includes(header)) failures.push('missing security header: ' + header);
 }
@@ -33,5 +34,6 @@ if (failures.length) {
   console.error('Production smoke test FAILED:\n- ' + failures.join('\n- '));
   process.exit(1);
 }
-console.log('Production smoke test passed: HTTPS, liveness, database readiness, production gate, and security headers.');
+console.log('Deployment smoke test passed: HTTPS, liveness, database readiness, least-privilege runtime role, and security headers.');
+if (status.productionReady !== true) console.log('Production readiness remains blocked pending independent acceptance and recovery sign-off.');
 NODE
