@@ -361,7 +361,7 @@ app.post('/api/v1/auth/change-password', requireAuth, async (req,res,next) => {
     await withSchoolTransaction(auth.schoolId,async client=>{
       await client.query('UPDATE users SET password_hash=$2,must_change_password=false,password_changed_at=now() WHERE id=$1',[auth.userId,passwordHash]);
       await client.query('UPDATE auth_sessions SET revoked_at=now() WHERE user_id=$1 AND school_id=$2 AND id<>$3 AND revoked_at IS NULL',[auth.userId,auth.schoolId,auth.sessionId]);
-      await client.query("INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id) VALUES ($1,$2,'auth.password.change','user',$2)",[auth.schoolId,auth.userId]);
+      await client.query("INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id) VALUES ($1,$2,'auth.password.change','user',$3)",[auth.schoolId,auth.userId,auth.userId]);
     });
     const rotated=await createSession(auth.userId,auth.schoolId);
     res.json({changed:true,token:rotated.token,expiresAt:rotated.expiresAt.toISOString(),message:'Password updated. Previous sessions are no longer valid.'});
@@ -374,8 +374,8 @@ app.post('/api/v1/auth/logout', requireAuth, async (req,res,next) => {
     await withSchoolTransaction(auth.schoolId, async client => {
       await client.query('UPDATE auth_sessions SET revoked_at=now() WHERE id=$1 AND school_id=$2 AND revoked_at IS NULL',[auth.sessionId,auth.schoolId]);
       await client.query(
-        "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id) VALUES ($1,$2,'auth.logout','user',$2)",
-        [auth.schoolId,auth.userId],
+        "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id) VALUES ($1,$2,'auth.logout','user',$3)",
+        [auth.schoolId,auth.userId,auth.userId],
       );
     });
     res.status(204).end();
