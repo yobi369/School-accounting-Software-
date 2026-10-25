@@ -136,7 +136,7 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
     const yearId=randomUUID(),periodId=randomUUID(),studentId=randomUUID();
     const cashId=randomUUID(),receivableId=randomUUID(),payableId=randomUUID(),incomeId=randomUUID(),expenseAccountId=randomUUID();
     const code='WF'+randomUUID().replaceAll('-','').slice(0,10).toUpperCase();
-    const permissionCodes=['fees.manage','receipts.create','expenses.create','expenses.approve','expenses.pay'];
+    const permissionCodes=['fees.manage','receipts.create','expenses.create','expenses.approve','expenses.pay','reports.read'];
     await withSchoolTransaction(schoolId,async c=>{
       await c.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[schoolId,'Workflow Integration School',code]);
       for(const [kind,id] of Object.entries(userIds)){
@@ -150,7 +150,7 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
         await c.query('INSERT INTO permissions (code,description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING',[permission,permission]);
       }
       const assignments=[
-        ['requester',['fees.manage','receipts.create','expenses.create','expenses.approve']],
+        ['requester',['fees.manage','receipts.create','expenses.create','expenses.approve','reports.read']],
         ['approver',['expenses.approve','expenses.pay']],
         ['payer',['expenses.pay']],
       ] as const;
@@ -207,6 +207,22 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       expect(overAllocation.status).toBe(422);
       expect(overAllocation.body.error).toMatch(/outstanding balance/);
 
+      // Complete the second instalment and verify the invoice and ledger-backed
+      // trial balance reconcile through the same authenticated API.
+      const finalReceipt=await post('/api/v1/fees/receipts',requesterSession.token,{
+        studentId,receiptNumber:'WF-RCT-002',receivedOn:'2026-02-07',amount:'600.00',
+        paymentAccountId:cashId,paymentMethod:'cash',allocations:[{invoiceId,amount:'600.00'}],
+      },{'Idempotency-Key':'workflow-receipt-002'});
+      expect(finalReceipt.status).toBe(201);
+      expect(finalReceipt.body.receipt.status).toBe('posted');
+      const trialBalanceResponse=await fetch(base+'/api/v1/reports/trial-balance',{
+        headers:{Authorization:'Bearer '+requesterSession.token},
+      });
+      expect(trialBalanceResponse.status).toBe(200);
+      const trialBalance=await trialBalanceResponse.json() as {totals:{debit:string;credit:string;balanced:boolean}};
+      expect(trialBalance.totals.balanced).toBe(true);
+      expect(trialBalance.totals.debit).toBe(trialBalance.totals.credit);
+
       const expenseResult=await post('/api/v1/expenses',requesterSession.token,{
         expenseNumber:'WF-EXP-001',expenseAccountId,category:'Supplies',description:'Classroom supplies',incurredOn:'2026-02-06',amount:'200.00',
       });
@@ -234,13 +250,15 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
         const journals=await c.query("SELECT count(*)::int AS n FROM journal_entries WHERE school_id=$1 AND status='posted'",[schoolId]);
         return {invoice:invoice.rows[0],allocation:allocation.rows[0],receipts:receipts.rows[0],expense:expense.rows[0],journals:journals.rows[0]};
       });
-      expect(totals.invoice.status).toBe('part_paid');
-      expect(totals.allocation.total).toBe('400.00');
+      expect(totals.invoice.status).toBe('paid');
+      expect(totals.allocation.total).toBe('1000.00');
       expect(totals.receipts.n).toBe(1);
+      const secondReceiptCount=await withSchoolTransaction(schoolId,c=>c.query("SELECT count(*)::int AS n FROM fee_receipts WHERE school_id=$1 AND receipt_number='WF-RCT-002'",[schoolId]));
+      expect(secondReceiptCount.rows[0].n).toBe(1);
       expect(totals.expense.status).toBe('paid');
       expect(totals.expense.paid_at).toBeTruthy();
       expect(totals.expense.payment_journal_entry_id).toBeTruthy();
-      expect(totals.journals.n).toBe(4);
+      expect(totals.journals.n).toBe(5);
     } finally {
       await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
     }
