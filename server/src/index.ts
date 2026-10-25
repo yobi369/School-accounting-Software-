@@ -180,8 +180,8 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
         await client.query('INSERT INTO accounts (school_id,code,name,account_type) VALUES ($1,$2,$3,$4)', [schoolId,code,name,type]);
       }
       await client.query(
-        "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id,metadata) VALUES ($1,$2,'school.bootstrap','school',$1,$3::jsonb)",
-        [schoolId,userId,JSON.stringify({ schoolCode, email })],
+        "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id,metadata) VALUES ($1,$2,'school.bootstrap','school',$3,$4::jsonb)",
+        [schoolId,userId,schoolId,JSON.stringify({ schoolCode, email })],
       );
       return true;
     });
