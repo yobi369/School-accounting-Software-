@@ -63,3 +63,6 @@
 .sl-chart-group:last-child{border-bottom:0}
 .sl-chart-group>.sl-chart-row{margin:.45rem 0 0}
 @media(max-width:640px){.sl-chart-row{grid-template-columns:1fr auto;gap:.35rem}.sl-chart-row progress{grid-column:1/-1;grid-row:2}.sl-chart-row strong,.sl-chart-row b{font-size:.82rem}}
+
+.sl-receipt-actions{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:1rem}
+.sl-receipt-actions .sl-action{white-space:normal}
