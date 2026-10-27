@@ -646,17 +646,18 @@ operationsRouter.post('/sync/push',requirePermission('expenses.create'),wrap(asy
 operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(req,res)=>{
   const auth=authContext(req);
   const dates=reportDateFilters(req,res);if(!dates)return;
+  const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;
   const data=await withSchoolTransaction(auth.schoolId,async c=>{
     const fees=await c.query(
       `SELECT
-       COALESCE((SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)),0)::text AS billed,
-       COALESCE((SELECT sum(r.amount) FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)),0)::text AS collected,
+       COALESCE((SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),0)::text AS billed,
+       COALESCE(CASE WHEN $4::uuid IS NULL THEN (SELECT sum(r.amount) FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)) ELSE (SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=$1 AND r.status='posted' AND fs.academic_term_id=$4::uuid AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)) END,0)::text AS collected,
        COALESCE((SELECT sum(i.amount-COALESCE(a.allocated,0)-COALESCE(a.waived,0)) FROM fee_invoices i LEFT JOIN
         (SELECT a.invoice_id,sum(a.amount) AS allocated FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND r.status='posted' GROUP BY a.invoice_id) a ON a.invoice_id=i.id LEFT JOIN
         (SELECT invoice_id,sum(amount) AS waived FROM fee_waivers WHERE school_id=$1 AND status='posted' GROUP BY invoice_id) w ON w.invoice_id=i.id
-        WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)),0)::text AS outstanding,
-       CASE WHEN COALESCE((SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)),0)=0 THEN '0'
-       ELSE round(100.0*COALESCE((SELECT sum(r.amount) FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)),0)/
+        WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),0)::text AS outstanding,
+       CASE WHEN COALESCE((SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),0)=0 THEN '0'
+       ELSE round(100.0*COALESCE(CASE WHEN $4::uuid IS NULL THEN (SELECT sum(r.amount) FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)) ELSE (SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=$1 AND r.status='posted' AND fs.academic_term_id=$4::uuid AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)) END,0)/
        (SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)),2)::text END AS collection_percent`,
       [auth.schoolId,dates.from,dates.to]);
     const expenses=await c.query(
@@ -668,7 +669,8 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
       `SELECT r.receipt_number,r.received_on,s.admission_number,s.full_name AS student_name,r.amount::text,r.payment_method,r.external_reference
        FROM fee_receipts r JOIN students s ON s.id=r.student_id AND s.school_id=r.school_id
        WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
-       ORDER BY r.received_on DESC,r.receipt_number DESC LIMIT 5`,[auth.schoolId,dates.from,dates.to]);
+         AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid))
+       ORDER BY r.received_on DESC,r.receipt_number DESC LIMIT 5`,[auth.schoolId,dates.from,dates.to,academicTermId]);
     const pendingApprovals=await c.query(
       `SELECT expense_number,category,description,amount::text,incurred_on,status
        FROM expenses WHERE school_id=$1 AND status='submitted' ORDER BY incurred_on DESC,expense_number DESC LIMIT 5`,[auth.schoolId]);
@@ -679,18 +681,31 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
        LEFT JOIN (SELECT a.invoice_id,sum(a.amount) AS allocated FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND r.status='posted' GROUP BY a.invoice_id) a ON a.invoice_id=i.id
        LEFT JOIN (SELECT invoice_id,sum(amount) AS waived FROM fee_waivers WHERE school_id=$1 AND status='posted' GROUP BY invoice_id) w ON w.invoice_id=i.id
        WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)
+         AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
        GROUP BY s.id HAVING sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0))>0
-       ORDER BY sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0)) DESC LIMIT 5`,[auth.schoolId,dates.from,dates.to]);
+       ORDER BY sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0)) DESC LIMIT 5`,[auth.schoolId,dates.from,dates.to,academicTermId]);
     const feeCollectionTrend=await c.query(
-       `SELECT to_char(date_trunc('month',r.received_on),'YYYY-MM') AS month,
-          sum(r.amount)::numeric(14,2)::text AS collected
-        FROM fee_receipts r
-        WHERE r.school_id=$1 AND r.status='posted'
-          AND ($2::date IS NULL OR r.received_on >= $2::date)
-          AND ($3::date IS NULL OR r.received_on <= $3::date)
-        GROUP BY date_trunc('month',r.received_on)
-        ORDER BY date_trunc('month',r.received_on)`,[auth.schoolId,dates.from,dates.to]);
-     const incomeExpenseTrend=await c.query(
+       `SELECT to_char(date_trunc('month',collected_on),'YYYY-MM') AS month,
+          sum(amount)::numeric(14,2)::text AS collected
+        FROM (
+          SELECT r.received_on AS collected_on,r.amount
+          FROM fee_receipts r
+          WHERE r.school_id=$1 AND r.status='posted' AND $4::uuid IS NULL
+            AND ($2::date IS NULL OR r.received_on >= $2::date)
+            AND ($3::date IS NULL OR r.received_on <= $3::date)
+          UNION ALL
+          SELECT r.received_on AS collected_on,a.amount
+          FROM fee_receipt_allocations a
+          JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
+          JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+          JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
+          WHERE a.school_id=$1 AND r.status='posted' AND $4::uuid IS NOT NULL AND fs.academic_term_id=$4::uuid
+            AND ($2::date IS NULL OR r.received_on >= $2::date)
+            AND ($3::date IS NULL OR r.received_on <= $3::date)
+        ) collections
+        GROUP BY date_trunc('month',collected_on)
+        ORDER BY date_trunc('month',collected_on)`,[auth.schoolId,dates.from,dates.to,academicTermId]);
+     const incomeExpenseTrend=academicTermId?{rows:[] as Record<string,unknown>[]} : await c.query(
        `SELECT to_char(date_trunc('month',j.posting_date),'YYYY-MM') AS month,
           COALESCE(sum(CASE WHEN a.account_type='income' THEN l.credit-l.debit ELSE 0 END),0)::numeric(14,2)::text AS income,
           COALESCE(sum(CASE WHEN a.account_type='expense' THEN l.debit-l.credit ELSE 0 END),0)::numeric(14,2)::text AS expenses
@@ -704,7 +719,7 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
         ORDER BY date_trunc('month',j.posting_date)`,[auth.schoolId,dates.from,dates.to]);
      const bank=await c.query("SELECT count(*)::int AS unmatched FROM bank_statement_lines WHERE school_id=$1 AND matched_at IS NULL",[auth.schoolId]);
     const journals=await c.query("SELECT count(*)::int AS posted_count FROM journal_entries WHERE school_id=$1 AND status='posted' AND ($2::date IS NULL OR posting_date >= $2::date) AND ($3::date IS NULL OR posting_date <= $3::date)",[auth.schoolId,dates.from,dates.to]);
-    return {fees:fees.rows[0],expenses:expenses.rows[0],recentPayments:recentPayments.rows,pendingApprovals:pendingApprovals.rows,topOutstanding:topOutstanding.rows,feeCollectionTrend:feeCollectionTrend.rows,incomeExpenseTrend:incomeExpenseTrend.rows,unmatchedBankLines:bank.rows[0].unmatched,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to}};
+    return {fees:fees.rows[0],expenses:expenses.rows[0],recentPayments:recentPayments.rows,pendingApprovals:pendingApprovals.rows,topOutstanding:topOutstanding.rows,feeCollectionTrend:feeCollectionTrend.rows,incomeExpenseTrend:incomeExpenseTrend.rows,unmatchedBankLines:bank.rows[0].unmatched,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to,academicTermId}};
   });
   res.json({schoolId:auth.schoolId,summary:data});
 }));
