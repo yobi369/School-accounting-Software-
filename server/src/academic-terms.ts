@@ -79,7 +79,7 @@ academicTermsRouter.post('/academic-terms', requirePermission('periods.manage'),
     const parsed = termSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({error:'Invalid academic-term details.',details:parsed.error.flatten()}); return; }
     const d = parsed.data;
-    if (!validRange(d.startsOn,d.endsOn)) { res.status(422).json({error:'Term start must be on or before its end and both must be real calendar dates.'}); return; }
+    if (!isValidDateRange(d.startsOn,d.endsOn)) { res.status(422).json({error:'Term start must be on or before its end and both must be real calendar dates.'}); return; }
     const auth = authContext(req);
     const term = await withSchoolTransaction(auth.schoolId, async c => {
       const year = await c.query(
