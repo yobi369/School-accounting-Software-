@@ -70,7 +70,7 @@ function StudentProfileEditor({session,profile,onSaved}:{session:SchoolSession;p
   const [values,setValues]=useState<Record<string,string>>({});
   const [busy,setBusy]=useState(false);const [error,setError]=useState('');const [notice,setNotice]=useState('');
   useEffect(()=>{setValues(Object.fromEntries(fieldNames.map(k=>[k,String(profile[k]??'').slice(0,k==='date_of_birth'?10:1000)])));setError('');setNotice('');},[profile.id]);
-  const fields:[string,string,string][]=[
+  const fields:Array<[string,string,'text'|'date'|'tel'|'select'|'textarea']>=[
     ['admission_number','Admission number','text'],['full_name','Full name','text'],['class_name','Class / grade','text'],
     ['sex','Sex','select'],['date_of_birth','Date of birth','date'],['guardian_name','Parent / guardian name','text'],
     ['guardian_relationship','Guardian relationship','text'],['guardian_phone','Primary guardian phone','tel'],
