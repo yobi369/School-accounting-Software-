@@ -28,7 +28,7 @@ function kes(value: unknown): string {
 
 export function ReceiptPrintButton({ receipt }: { receipt: ReceiptRow }): ReactElement {
   const printReceipt = () => {
-    const popup = window.open('', '_blank', 'noopener,noreferrer,width=760,height=760');
+    const popup = window.open('', '_blank', 'width=760,height=760');
     if (!popup) {
       window.alert('Allow pop-ups for this site to print the receipt.');
       return;
