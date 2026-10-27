@@ -282,14 +282,14 @@ const invoiceSchema=z.object({
   dueOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/), amount:z.string(),
 });
 operationsRouter.get('/fees/invoices',requirePermission('fees.read'),wrap(async(req,res)=>{
-  const auth=authContext(req);
+  const auth=authContext(req);const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
     `SELECT i.id,i.invoice_number,i.student_id,s.admission_number,s.full_name AS student_name,
       i.academic_year,i.description,i.issued_on,i.due_on,i.amount::text,i.status,
       COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
       (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
      FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
-     WHERE i.school_id=$1 ORDER BY i.issued_on DESC,i.invoice_number DESC LIMIT 500`,[auth.schoolId]));
+     WHERE i.school_id=$1 AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$2::uuid)) ORDER BY i.issued_on DESC,i.invoice_number DESC LIMIT 500`,[auth.schoolId,academicTermId]));
   res.json({invoices:result.rows});
 }));
 operationsRouter.post('/fees/invoices',requirePermission('fees.manage'),wrap(async(req,res)=>{
