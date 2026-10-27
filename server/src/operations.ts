@@ -169,7 +169,7 @@ const feeStructureSchema=z.object({
   academicYear:z.string().trim().min(2).max(30),
   termName:z.string().trim().min(1).max(40),
   dueOn:z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/),
-  items:z.array(z.object({itemName:z.string().trim().min(1).max(100),amount:z.string()})).min(1).max(100),
+  items:z.array(z.object({itemName:z.string().trim().min(1).max(100),amount:z.string().regex(/^\\d+(?:\\.\\d{1,2})?$/)})).min(1).max(100),
 });
 operationsRouter.get('/fees/structures',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);
