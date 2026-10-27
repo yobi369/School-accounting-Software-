@@ -27,7 +27,9 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       await c.query('INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',[userId,`multi-${codeA.toLowerCase()}@example.test`,'test-hash','Multi School User']);
       await c.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[roleA,schoolA,'auditor']);
       await c.query('INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,$4)',[schoolA,userId,roleA,'active']);
-      await c.query('INSERT INTO students (id,school_id,admission_number,full_name) VALUES ($1,$2,$3,$4)',[studentA,schoolA,'TEST-A','Test Student A']);
+      await c.query(
+        'INSERT INTO students (id,school_id,admission_number,full_name,sex,date_of_birth,guardian_name,guardian_relationship,guardian_phone,guardian_alternate_phone,home_address,emergency_contact_name,emergency_contact_phone) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',
+        [studentA,schoolA,'TEST-A','Test Student A','female','2012-04-05','Amina Test','Mother','0712345678','0723456789','Voi, Taita Taveta','Emergency Contact','0734567890']);
       await c.query('INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',[yearId,schoolA,'Test Year','2026-01-01','2026-12-31']);
       await c.query('INSERT INTO accounting_periods (id,school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',[periodId,schoolA,yearId,'2026-01-01','2026-12-31']);
       await c.query("INSERT INTO accounts (id,school_id,code,name,account_type) VALUES ($1,$2,'T100','Test cash','asset'),($3,$2,'T400','Test income','income')",[cashId,schoolA,incomeId]);
@@ -37,6 +39,14 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       await c.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[roleB,schoolB,'accountant']);
       await c.query('INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,$4)',[schoolB,userId,roleB,'active']);
       await c.query('INSERT INTO students (id,school_id,admission_number,full_name) VALUES ($1,$2,$3,$4)',[studentB,schoolB,'TEST-B','Test Student B']);
+    });
+    const profile = await withSchoolTransaction(schoolA,c=>c.query(
+      'SELECT sex,date_of_birth::text AS date_of_birth,guardian_relationship,guardian_alternate_phone,home_address,emergency_contact_name,emergency_contact_phone FROM students WHERE school_id=$1 AND id=$2',
+      [schoolA,studentA]));
+    expect(profile.rows[0]).toMatchObject({
+      sex:'female',date_of_birth:'2012-04-05',guardian_relationship:'Mother',
+      guardian_alternate_phone:'0723456789',home_address:'Voi, Taita Taveta',
+      emergency_contact_name:'Emergency Contact',emergency_contact_phone:'0734567890',
     });
     const isolated = await withSchoolTransaction(schoolA,c=>c.query('SELECT id FROM students WHERE school_id=$1',[schoolB]));
     expect(isolated.rowCount).toBe(0);
