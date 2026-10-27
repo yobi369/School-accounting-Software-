@@ -314,7 +314,7 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       await c.query('INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',[userId,'report-'+code.toLowerCase()+'@example.test','test-hash','Report Test User']);
       await c.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[roleId,schoolId,'term_reporter']);
       await c.query('INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,$4)',[schoolId,userId,roleId,'active']);
-      for(const permission of ['reports.read','reports.export']){
+      for(const permission of ['reports.read','reports.export','fees.read','students.read']){
         await c.query('INSERT INTO permissions (code,description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING',[permission,permission]);
         await c.query('INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING',[roleId,permission]);
       }
@@ -343,6 +343,14 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       expect(invoiceResponse.status).toBe(200);
       const invoiceReport=await invoiceResponse.json() as {rows:Array<{invoice_number:string}>};
       expect(invoiceReport.rows.map(row=>row.invoice_number)).toEqual(['TERM-INV-1']);
+
+      const invoiceListResponse=await fetch(base+'/api/v1/fees/invoices?academicTermId='+termOneId,{headers});
+      expect(invoiceListResponse.status).toBe(200);
+      expect((await invoiceListResponse.json() as {invoices:Array<{invoice_number:string}>}).invoices.map(row=>row.invoice_number)).toEqual(['TERM-INV-1']);
+
+      const statementResponse=await fetch(base+'/api/v1/students/'+studentId+'/financial-account?academicTermId='+termTwoId,{headers});
+      expect(statementResponse.status).toBe(200);
+      expect((await statementResponse.json() as {transactions:Array<{reference:string}>}).transactions.map(row=>row.reference)).toEqual(['TERM-INV-2']);
 
       const balanceResponse=await fetch(base+'/api/v1/reports/fee-balances?academicTermId='+termTwoId,{headers});
       expect(balanceResponse.status).toBe(200);
