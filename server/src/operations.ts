@@ -1338,8 +1338,8 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
     case 'fees-by-class':
       sql=`SELECT COALESCE(s.class_name,'Unassigned') AS class_name,count(DISTINCT s.id)::int AS students,
        COALESCE(sum(i.amount),0)::text AS invoiced
-       FROM students s LEFT JOIN fee_invoices i ON i.school_id=s.school_id AND i.student_id=s.id AND i.status<>'void'
-       WHERE s.school_id=$1 AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_invoices fi WHERE fi.school_id=s.school_id AND fi.student_id=s.id AND fi.academic_term_id=$4::uuid AND fi.status<>'void')) GROUP BY s.class_name ORDER BY s.class_name`;break;
+       FROM students s LEFT JOIN fee_invoices i ON i.school_id=s.school_id AND i.student_id=s.id AND i.status<>'void' AND ($4::uuid IS NULL OR i.academic_term_id=$4::uuid)
+       WHERE s.school_id=$1 GROUP BY s.class_name ORDER BY s.class_name`;break;
     case 'audit-trail':
       sql=`SELECT created_at,actor_user_id,action,entity_type,entity_id,request_id,metadata
        FROM audit_events WHERE school_id=$1 AND ($2::date IS NULL OR created_at::date >= $2::date) AND ($3::date IS NULL OR created_at::date <= $3::date)
