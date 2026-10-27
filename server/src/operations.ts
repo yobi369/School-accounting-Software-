@@ -1371,6 +1371,7 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
   const dateReports=['trial-balance','income-statement','general-ledger','cashbook','bankbook','receipts-register','invoice-register','fee-balances','expense-register','bank-reconciliation','journal-register','collections-by-method','audit-trail'];
   const termReports=['receipts-register','invoice-register','fee-balances','fee-aging','collections-by-method','fees-by-class'];
   if(name==='balance-sheet')params=[schoolId,to];
+  else if(name==='expense-register'||name==='supplier-payables')params=[schoolId,from,to,academicTermId];
   else if(termReports.includes(name)&&dateReports.includes(name))params=[schoolId,from,to,academicTermId];
   else if(name==='fees-by-class')params=[schoolId,academicTermId];
   else if(termReports.includes(name))params=[schoolId,from,to,academicTermId];
