@@ -1302,7 +1302,7 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
        (CURRENT_DATE-i.due_on)::int AS days_overdue,
        (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
        FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
-       WHERE i.school_id=$1 AND i.status<>'void' AND i.due_on<CURRENT_DATE AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
+       WHERE i.school_id=$1 AND i.status<>'void' AND i.due_on<CURRENT_DATE AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
        ORDER BY i.due_on,s.full_name LIMIT 5000`;break;
     case 'expense-register':
       sql=`SELECT e.expense_number,e.incurred_on,e.category,e.description,e.amount::text,e.status,s.name AS supplier
@@ -1338,7 +1338,7 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
     case 'fees-by-class':
       sql=`SELECT COALESCE(s.class_name,'Unassigned') AS class_name,count(DISTINCT s.id)::int AS students,
        COALESCE(sum(i.amount),0)::text AS invoiced
-       FROM students s LEFT JOIN fee_invoices i ON i.school_id=s.school_id AND i.student_id=s.id AND i.status<>'void' AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
+       FROM students s LEFT JOIN fee_invoices i ON i.school_id=s.school_id AND i.student_id=s.id AND i.status<>'void' AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$2::uuid))
        WHERE s.school_id=$1 GROUP BY s.class_name ORDER BY s.class_name`;break;
     case 'audit-trail':
       sql=`SELECT created_at,actor_user_id,action,entity_type,entity_id,request_id,metadata
@@ -1350,6 +1350,7 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
   const termReports=['receipts-register','invoice-register','fee-balances','fee-aging','collections-by-method','fees-by-class'];
   if(name==='balance-sheet')params=[schoolId,to];
   else if(termReports.includes(name)&&dateReports.includes(name))params=[schoolId,from,to,academicTermId];
+  else if(name==='fees-by-class')params=[schoolId,academicTermId];
   else if(termReports.includes(name))params=[schoolId,from,to,academicTermId];
   else if(dateReports.includes(name))params=[schoolId,from,to];
   else params=[schoolId];
