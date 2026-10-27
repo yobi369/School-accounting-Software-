@@ -566,6 +566,11 @@ if (process.env.NODE_ENV === 'production') {
 }
 app.use((_req,res) => { res.status(404).json({error:'Not found'}); });
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const statusCode = (error as { statusCode?: unknown })?.statusCode;
+  if (typeof statusCode === 'number' && Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 499) {
+    res.status(statusCode).json({ error: error instanceof Error ? error.message : 'Request rejected.' });
+    return;
+  }
   const code = (error as { code?: string })?.code;
   if (code === '23505') { res.status(409).json({error:'A record with these unique details already exists.'}); return; }
   if (code === '23503' || code === '23514' || code === '55000') { res.status(422).json({error:'The financial operation violates an accounting or data-integrity rule.'}); return; }
