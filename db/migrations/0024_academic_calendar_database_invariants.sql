@@ -19,6 +19,16 @@ BEGIN
       USING ERRCODE = '23514', CONSTRAINT = 'academic_years_no_overlap';
   END IF;
 
+  IF EXISTS (
+    SELECT 1 FROM academic_terms t
+    WHERE t.school_id = NEW.school_id
+      AND t.academic_year_id = NEW.id
+      AND (t.starts_on < NEW.starts_on OR t.ends_on > NEW.ends_on)
+  ) THEN
+    RAISE EXCEPTION 'Academic year dates must continue to contain all existing terms'
+      USING ERRCODE = '23514', CONSTRAINT = 'academic_years_contain_terms';
+  END IF;
+
   RETURN NEW;
 END;
 $$;
