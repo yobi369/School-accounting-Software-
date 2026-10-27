@@ -17,21 +17,21 @@ function sqlDate(value:unknown):string {
   }
   return String(value).slice(0,10);
 }
-function amountString(minor: bigint): string {
+export function amountString(minor: bigint): string {
   const sign = minor < 0n ? '-' : '';
   const absolute = minor < 0n ? -minor : minor;
   return sign + (absolute / 100n).toString() + '.' + (absolute % 100n).toString().padStart(2,'0');
 }
 function asMoney(value: string): string { return amountString(parseKesToMinorUnits(value)); }
-function audit(client: PoolClient, schoolId:string, userId:string, action:string, type:string, id:string, metadata:Record<string,unknown>={}) {
+export function audit(client: PoolClient, schoolId:string, userId:string, action:string, type:string, id:string, metadata:Record<string,unknown>={}) {
   return client.query(
     'INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id,metadata) VALUES ($1,$2,$3,$4,$5,$6::jsonb)',
     [schoolId,userId,action,type,id,JSON.stringify(metadata)],
   );
 }
 
-type PostingLine = { accountId?: string; accountCode?: string; debit: string; credit: string; memo?: string };
-async function postJournal(client: PoolClient, schoolId:string, userId:string, date:string, description:string, sourceType:string, sourceId:string, postingLines:PostingLine[], reversalOfId?:string) {
+export type PostingLine = { accountId?: string; accountCode?: string; debit: string; credit: string; memo?: string };
+export async function postJournal(client: PoolClient, schoolId:string, userId:string, date:string, description:string, sourceType:string, sourceId:string, postingLines:PostingLine[], reversalOfId?:string) {
   const period = await client.query(
     `SELECT y.id AS year_id,p.id AS period_id
      FROM financial_years y JOIN accounting_periods p
