@@ -164,6 +164,90 @@ operationsRouter.post('/students',requirePermission('students.manage'),wrap(asyn
   res.status(201).json({student});
 }));
 
+const feeStructureSchema=z.object({
+  className:z.string().trim().min(1).max(80),
+  academicYear:z.string().trim().min(2).max(30),
+  termName:z.string().trim().min(1).max(40),
+  dueOn:z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/),
+  items:z.array(z.object({itemName:z.string().trim().min(1).max(100),amount:z.string()})).min(1).max(100),
+});
+operationsRouter.get('/fees/structures',requirePermission('fees.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    "SELECT f.id,f.class_name,f.academic_year,f.term_name,f.due_on,f.status,f.created_at,COALESCE(json_agg(json_build_object('id',i.id,'itemName',i.item_name,'amount',i.amount::text)) FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS items,COALESCE((SELECT count(*)::int FROM fee_invoices inv WHERE inv.school_id=f.school_id AND inv.fee_structure_id=f.id),0) AS invoices_created FROM fee_structures f LEFT JOIN fee_structure_items i ON i.school_id=f.school_id AND i.structure_id=f.id WHERE f.school_id=$1 GROUP BY f.id ORDER BY f.academic_year DESC,f.term_name,f.class_name",
+    [auth.schoolId]));
+  res.json({structures:result.rows});
+}));
+operationsRouter.post('/fees/structures',requirePermission('fees.manage'),wrap(async(req,res)=>{
+  const parsed=feeStructureSchema.safeParse(req.body);
+  if(!parsed.success){res.status(400).json({error:'Invalid fee structure details.',details:parsed.error.flatten()});return;}
+  const d=parsed.data;const auth=authContext(req);
+  const items=d.items.map(item=>({itemName:item.itemName,minor:parseKesToMinorUnits(item.amount)}));
+  if(items.some(item=>item.minor<=0n)){res.status(422).json({error:'Each fee item amount must be greater than zero.'});return;}
+  if(new Set(items.map(item=>item.itemName.toLowerCase())).size!==items.length){res.status(422).json({error:'Fee item names must be unique within a structure.'});return;}
+  try{
+    const structure=await withSchoolTransaction(auth.schoolId,async c=>{
+      const id=randomUUID();
+      await c.query("INSERT INTO fee_structures (id,school_id,class_name,academic_year,term_name,due_on,status,created_by) VALUES ($1,$2,$3,$4,$5,$6,'draft',$7)",[id,auth.schoolId,d.className,d.academicYear,d.termName,d.dueOn,auth.userId]);
+      for(const item of items)await c.query("INSERT INTO fee_structure_items (id,school_id,structure_id,item_name,amount) VALUES ($1,$2,$3,$4,$5)",[randomUUID(),auth.schoolId,id,item.itemName,amountString(item.minor)]);
+      await audit(c,auth.schoolId,auth.userId,'fee.structure.create','fee_structure',id,{className:d.className,academicYear:d.academicYear,termName:d.termName,itemCount:items.length});
+      return {id,className:d.className,academicYear:d.academicYear,termName:d.termName,dueOn:d.dueOn,status:'draft',items:items.map(item=>({itemName:item.itemName,amount:amountString(item.minor)}))};
+    });
+    res.status(201).json({structure});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+operationsRouter.post('/fees/structures/:id/activate',requirePermission('fees.manage'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid fee structure ID.'});return;}
+  const auth=authContext(req);
+  const result=await withSchoolTransaction(auth.schoolId,async c=>{
+    const row=await c.query("SELECT f.id,f.status,COALESCE(sum(i.amount),0)::text AS total,count(i.id)::int AS item_count FROM fee_structures f LEFT JOIN fee_structure_items i ON i.school_id=f.school_id AND i.structure_id=f.id WHERE f.school_id=$1 AND f.id=$2 GROUP BY f.id FOR UPDATE",[auth.schoolId,id.data]);
+    if(!row.rowCount)throw Object.assign(new Error('Fee structure not found in this school.'),{statusCode:404});
+    if(row.rows[0].status==='archived')throw Object.assign(new Error('Archived fee structures cannot be activated.'),{statusCode:409});
+    if(Number(row.rows[0].item_count)<1||parseKesToMinorUnits(String(row.rows[0].total))<=0n)throw Object.assign(new Error('Add at least one positive fee item before activation.'),{statusCode:422});
+    await c.query("UPDATE fee_structures SET status='active' WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data]);
+    await audit(c,auth.schoolId,auth.userId,'fee.structure.activate','fee_structure',id.data,{itemCount:row.rows[0].item_count,total:row.rows[0].total});
+    return {id:id.data,status:'active',total:row.rows[0].total,itemCount:row.rows[0].item_count};
+  });
+  res.json({structure:result});
+}));
+operationsRouter.post('/fees/structures/:id/invoice-class',requirePermission('fees.manage'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid fee structure ID.'});return;}
+  const auth=authContext(req);const issuedOn=todayIso();
+  try{
+    const outcome=await withSchoolTransaction(auth.schoolId,async c=>{
+      const structure=await c.query("SELECT * FROM fee_structures WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
+      if(!structure.rowCount)throw Object.assign(new Error('Fee structure not found in this school.'),{statusCode:404});
+      const f=structure.rows[0];
+      if(f.status!=='active')throw Object.assign(new Error('Activate the fee structure before bulk invoicing.'),{statusCode:409});
+      if(String(f.due_on)<issuedOn)throw Object.assign(new Error('The structure due date is before today; update the structure or use a valid due date.'),{statusCode:422});
+      const items=await c.query("SELECT item_name,amount::text FROM fee_structure_items WHERE school_id=$1 AND structure_id=$2 ORDER BY item_name",[auth.schoolId,id.data]);
+      if(!items.rowCount)throw Object.assign(new Error('This fee structure has no items.'),{statusCode:422});
+      const total=items.rows.reduce((sum,item)=>sum+parseKesToMinorUnits(String(item.amount)),0n);
+      if(total<=0n)throw Object.assign(new Error('Fee structure total must be greater than zero.'),{statusCode:422});
+      const students=await c.query("SELECT id,admission_number FROM students WHERE school_id=$1 AND class_name=$2 AND status='active' ORDER BY admission_number",[auth.schoolId,f.class_name]);
+      if(!students.rowCount)throw Object.assign(new Error('No active students found in the selected class.'),{statusCode:422});
+      const created=[];const skipped=[];
+      for(const student of students.rows){
+        const existing=await c.query("SELECT id,invoice_number FROM fee_invoices WHERE school_id=$1 AND student_id=$2 AND fee_structure_id=$3",[auth.schoolId,student.id,id.data]);
+        if(existing.rowCount){skipped.push({studentId:student.id,invoiceNumber:existing.rows[0].invoice_number});continue;}
+        const invoiceId=randomUUID();
+        const invoiceNumber='FS-'+id.data.replace(/-/g,'').slice(0,10).toUpperCase()+'-'+String(student.id).replace(/-/g,'').slice(0,10).toUpperCase();
+        const description=items.rows.map(item=>String(item.item_name)).join(', ');
+        await c.query("INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,issued_on,due_on,amount,status,created_by,fee_structure_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'issued',$10,$11)",[invoiceId,auth.schoolId,student.id,invoiceNumber,f.academic_year,description,issuedOn,f.due_on,amountString(total),auth.userId,id.data]);
+        const journal=await postJournal(c,auth.schoolId,auth.userId,issuedOn,'Bulk fee invoice '+invoiceNumber+': '+description,'fee_invoice',invoiceId,[
+          {accountCode:'1200',debit:amountString(total),credit:'0.00'},
+          {accountCode:'4000',debit:'0.00',credit:amountString(total)},
+        ]);
+        await audit(c,auth.schoolId,auth.userId,'fee.invoice.bulk_issue','fee_invoice',invoiceId,{invoiceNumber,structureId:id.data,studentId:student.id,amount:amountString(total),itemCount:items.rows.length,journalEntryId:journal.id});
+        created.push({studentId:student.id,invoiceNumber,amount:amountString(total),journalEntryId:journal.id});
+      }
+      await audit(c,auth.schoolId,auth.userId,'fee.structure.bulk_invoice','fee_structure',id.data,{createdCount:created.length,skippedCount:skipped.length,academicYear:f.academic_year,termName:f.term_name});
+      return {structureId:id.data,created,skipped,createdCount:created.length,skippedCount:skipped.length,totalPerInvoice:amountString(total)};
+    });
+    res.status(200).json(outcome);
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
 const invoiceSchema=z.object({
   studentId:z.string().uuid(), invoiceNumber:z.string().trim().min(1).max(60),
   academicYear:z.string().trim().min(2).max(30), description:z.string().trim().min(2).max(500),
