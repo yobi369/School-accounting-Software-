@@ -1220,7 +1220,7 @@ operationsRouter.get('/reports/income-statement',requirePermission('reports.read
 }));
 
 operationsRouter.get('/reports/fee-balances',requirePermission('reports.read'),wrap(async(req,res)=>{
-  const auth=authContext(req);const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+  const auth=authContext(req);const dates=reportDateFilters(req,res);if(!dates)return;const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
     `SELECT s.admission_number,s.full_name,i.invoice_number,i.academic_year,i.due_on,i.amount::text,
       COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)::text AS allocated,
       COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
@@ -1228,17 +1228,17 @@ operationsRouter.get('/reports/fee-balances',requirePermission('reports.read'),w
      FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
      LEFT JOIN fee_receipt_allocations a ON a.school_id=i.school_id AND a.invoice_id=i.id
      LEFT JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
-     WHERE i.school_id=$1 AND i.status<>'void'
+     WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR i.academic_term_id=$4::uuid)
      GROUP BY i.id,s.id HAVING i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>0
-     ORDER BY i.due_on,s.full_name LIMIT 2000`,[auth.schoolId]));
+     ORDER BY i.due_on,s.full_name LIMIT 2000`,[auth.schoolId,dates.from,dates.to,academicTermId]));
   res.json({report:'fee-balances',currency:'KES',rows:result.rows});
 }));
 
 
 const reportNames=['trial-balance','income-statement','balance-sheet','general-ledger','cashbook','bankbook','receipts-register','invoice-register','fee-balances','fee-aging','expense-register','supplier-payables','bank-reconciliation','budget-variance','journal-register','collections-by-method','fees-by-class','audit-trail'];
-async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:string|null,to:string|null):Promise<Record<string,unknown>[]>{
+async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:string|null,to:string|null,academicTermId:string|null):Promise<Record<string,unknown>[]>{
   let sql='';
-  let params:unknown[]=[schoolId,from,to];
+  let params:unknown[]=[schoolId,from,to,academicTermId];
   switch(name){
     case 'trial-balance':
       sql=`SELECT a.code,a.name,a.account_type,
@@ -1282,11 +1282,12 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
       sql=`SELECT r.receipt_number,r.received_on,s.admission_number,s.full_name AS student,r.amount::text,r.payment_method,r.external_reference,r.status
        FROM fee_receipts r JOIN students s ON s.id=r.student_id AND s.school_id=r.school_id
        WHERE r.school_id=$1 AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
+       AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND i.academic_term_id=$4::uuid))
        ORDER BY r.received_on DESC,r.receipt_number LIMIT 5000`;break;
     case 'invoice-register':
       sql=`SELECT i.invoice_number,i.issued_on,i.due_on,s.admission_number,s.full_name AS student,i.academic_year,i.amount::text,i.status
        FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
-       WHERE i.school_id=$1 AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)
+       WHERE i.school_id=$1 AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR i.academic_term_id=$4::uuid)
        ORDER BY i.issued_on DESC,i.invoice_number LIMIT 5000`;break;
     case 'fee-balances':
       sql=`SELECT s.admission_number,s.full_name,i.invoice_number,i.academic_year,i.issued_on,i.due_on,i.amount::text,
@@ -1294,14 +1295,14 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
        COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
        (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
        FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
-       WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)
+       WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR i.academic_term_id=$4::uuid)
        ORDER BY i.due_on,s.full_name LIMIT 5000`;break;
     case 'fee-aging':
       sql=`SELECT s.admission_number,s.full_name,i.invoice_number,i.due_on,
        (CURRENT_DATE-i.due_on)::int AS days_overdue,
        (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
        FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
-       WHERE i.school_id=$1 AND i.status<>'void' AND i.due_on<CURRENT_DATE
+       WHERE i.school_id=$1 AND i.status<>'void' AND i.due_on<CURRENT_DATE AND ($4::uuid IS NULL OR i.academic_term_id=$4::uuid)
        ORDER BY i.due_on,s.full_name LIMIT 5000`;break;
     case 'expense-register':
       sql=`SELECT e.expense_number,e.incurred_on,e.category,e.description,e.amount::text,e.status,s.name AS supplier
@@ -1337,7 +1338,7 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
       sql=`SELECT COALESCE(s.class_name,'Unassigned') AS class_name,count(DISTINCT s.id)::int AS students,
        COALESCE(sum(i.amount),0)::text AS invoiced
        FROM students s LEFT JOIN fee_invoices i ON i.school_id=s.school_id AND i.student_id=s.id AND i.status<>'void'
-       WHERE s.school_id=$1 GROUP BY s.class_name ORDER BY s.class_name`;break;
+       WHERE s.school_id=$1 AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_invoices fi WHERE fi.school_id=s.school_id AND fi.student_id=s.id AND fi.academic_term_id=$4::uuid AND fi.status<>'void')) GROUP BY s.class_name ORDER BY s.class_name`;break;
     case 'audit-trail':
       sql=`SELECT created_at,actor_user_id,action,entity_type,entity_id,request_id,metadata
        FROM audit_events WHERE school_id=$1 AND ($2::date IS NULL OR created_at::date >= $2::date) AND ($3::date IS NULL OR created_at::date <= $3::date)
@@ -1346,10 +1347,15 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
   }
   const dateReports=['trial-balance','income-statement','general-ledger','cashbook','bankbook','receipts-register','invoice-register','fee-balances','expense-register','bank-reconciliation','journal-register','collections-by-method','audit-trail'];
   if(name==='balance-sheet')params=[schoolId,to];
-  else if(dateReports.includes(name))params=[schoolId,from,to];
-  else params=[schoolId];
+  else if(dateReports.includes(name))params=[schoolId,from,to,academicTermId];
+  else params=[schoolId,from,to,academicTermId];
   const result=await c.query(sql,params);
   return result.rows as Record<string,unknown>[];
+}
+function reportAcademicTermFilter(req:Request,res:Response):string|null|undefined{
+  const value=typeof req.query.academicTermId==='string'?req.query.academicTermId:null;
+  if(value&&!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)){res.status(400).json({error:'Academic term ID must be a valid UUID.'});return undefined;}
+  return value;
 }
 function reportDateFilters(req:Request,res:Response):{from:string|null;to:string|null}|null{
   const from=typeof req.query.from==='string'?req.query.from:null;
@@ -1360,8 +1366,8 @@ function reportDateFilters(req:Request,res:Response):{from:string|null;to:string
 }
 operationsRouter.get('/reports/:report.csv',requirePermission('reports.export'),wrap(async(req,res)=>{
   const name=String(req.params.report);if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
-  const dates=reportDateFilters(req,res);if(!dates)return;const auth=authContext(req);
-  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to));
+  const dates=reportDateFilters(req,res);if(!dates)return;const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;const auth=authContext(req);
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to,academicTermId));
   const keys=rows.length?Object.keys(rows[0]):['no_data'];
   const quote=(v:unknown)=>{let value=String(v??'');if(/^[=+@]/.test(value)||/^-[A-Za-z]/.test(value))value="'"+value;return /[",\r\n]/.test(value)?'"'+value.replace(/"/g,'""')+'"':value;};
   const csv=[keys.map(quote).join(','),...rows.map(row=>keys.map(k=>quote(row[k])).join(','))].join('\r\n');
@@ -1399,8 +1405,8 @@ function labelsForReport(key:string):string{return key.replaceAll('_',' ');}
 operationsRouter.get('/reports/:report',requirePermission('reports.read'),wrap(async(req,res)=>{
   const name=String(req.params.report);
   if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
-  const dates=reportDateFilters(req,res);if(!dates)return;
+  const dates=reportDateFilters(req,res);if(!dates)return;const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;
   const auth=authContext(req);
-  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to));
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to,academicTermId));
   res.json({report:name,currency:'KES',from:dates.from,to:dates.to,rows});
 }));
