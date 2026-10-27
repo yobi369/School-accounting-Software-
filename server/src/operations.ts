@@ -1394,8 +1394,8 @@ operationsRouter.get('/reports/:report.xlsx',requirePermission('reports.export')
 }));
 operationsRouter.get('/reports/:report.pdf',requirePermission('reports.export'),wrap(async(req,res)=>{
   const name=String(req.params.report);if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
-  const dates=reportDateFilters(req,res);if(!dates)return;const auth=authContext(req);
-  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to));
+  const dates=reportDateFilters(req,res);if(!dates)return;const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;const auth=authContext(req);
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to,academicTermId));
   const PdfDocument=(await import('pdfkit')).default;const doc=new PdfDocument({size:'A4',layout:'landscape',margin:32,bufferPages:true});
   res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename="${name}-${todayIso()}.pdf"`);
   doc.pipe(res);doc.fontSize(18).fillColor('#174c3d').text('ShuleLedger — '+name.replaceAll('-',' '));doc.moveDown(.4);
