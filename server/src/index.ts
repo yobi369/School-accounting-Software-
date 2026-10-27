@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { authContext, createSession, hashPassword, hashToken, requireAuth, requirePermission, safeSecretEquals, verifyPassword } from './auth.js';
 import { pool, requirePool, withSchoolTransaction } from './db.js';
 import { operationsRouter } from './operations.js';
+import { studentProfileEditRouter } from './student-profile-edit.js';
 import { formatMinorUnitsKes, parseKesToMinorUnits, validateJournal } from './domain/ledger.js';
 
 const app = express();
@@ -552,6 +553,7 @@ app.post('/api/v1/dev/validate-journal', (req,res) => {
   } catch(error) { res.status(422).json({valid:false,error:error instanceof Error?error.message:'Journal validation failed',posted:false}); }
 });
 
+app.use('/api/v1', studentProfileEditRouter);
 app.use('/api/v1', operationsRouter);
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(resolve(process.cwd(), 'dist'), { index: false, maxAge: '1h' }));
