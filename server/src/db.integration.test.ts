@@ -274,6 +274,68 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
     }
   });
 
+  it('prevents duplicate bank reconciliation matches and preserves failed attempts', async () => {
+    const schoolId=randomUUID(),userId=randomUUID(),roleId=randomUUID();
+    const yearId=randomUUID(),periodId=randomUUID(),cashId=randomUUID(),incomeId=randomUUID(),bankId=randomUUID(),journalId=randomUUID();
+    const code='BANK'+randomUUID().replaceAll('-','').slice(0,8).toUpperCase();
+    const lineIds:string[]=[];
+    await withSchoolTransaction(schoolId,async db=>{
+      await db.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[schoolId,'Bank Reconciliation Test School',code]);
+      await db.query('INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',[userId,'bank-'+code.toLowerCase()+'@example.test','test-hash','Bank Reconciliation Tester']);
+      await db.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[roleId,schoolId,'bank_reconciliation_tester']);
+      await db.query("INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,'active')",[schoolId,userId,roleId]);
+      for(const permission of ['bank.reconcile','bank.read']){
+        await db.query('INSERT INTO permissions (code,description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING',[permission,permission]);
+        await db.query('INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING',[roleId,permission]);
+      }
+      await db.query('INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',[yearId,schoolId,'2026','2026-01-01','2026-12-31']);
+      await db.query('INSERT INTO accounting_periods (id,school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',[periodId,schoolId,yearId,'2026-01-01','2026-12-31']);
+      await db.query("INSERT INTO accounts (id,school_id,code,name,account_type) VALUES ($1,$2,'B100','Bank control','asset'),($3,$2,'B400','Test income','income')",[cashId,schoolId,incomeId]);
+      await db.query('INSERT INTO bank_accounts (id,school_id,name,bank_name,account_number_masked,ledger_account_id) VALUES ($1,$2,$3,$4,$5,$6)',[bankId,schoolId,'Test bank','Test Bank','****1234',cashId]);
+      await db.query("INSERT INTO journal_entries (id,school_id,financial_year_id,period_id,entry_number,posting_date,description,status,source_type) VALUES ($1,$2,$3,$4,1,'2026-03-01','Bank reconciliation test','draft','test')",[journalId,schoolId,yearId,periodId]);
+      const lines=await db.query("INSERT INTO journal_lines (school_id,journal_entry_id,account_id,line_number,debit,credit) VALUES ($1,$2,$3,1,55.00,0),($1,$2,$4,2,0,55.00) RETURNING id",[schoolId,journalId,cashId,incomeId]);
+      lineIds.push(...lines.rows.map((row:{id:string})=>String(row.id)));
+      await db.query("UPDATE journal_entries SET status='posted' WHERE school_id=$1 AND id=$2",[schoolId,journalId]);
+    });
+    const session=await createSession(userId,schoolId);
+    const app=express();app.use(express.json());app.use('/api/v1',operationsRouter);
+    const server=app.listen(0,'127.0.0.1');
+    try{
+      await new Promise<void>((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject);});
+      const address=server.address();
+      if(!address||typeof address==='string')throw new Error('Bank reconciliation test server did not bind to a TCP port.');
+      const base='http://127.0.0.1:'+address.port;
+      const post=async(body:unknown)=>{
+        const response=await fetch(base+'/api/v1/bank/reconcile',{method:'POST',headers:{Authorization:'Bearer '+session.token,'Content-Type':'application/json'},body:JSON.stringify(body)});
+        return {status:response.status,body:await response.json() as Record<string,any>};
+      };
+      const statementOne=randomUUID(),statementTwo=randomUUID();
+      await withSchoolTransaction(schoolId,async db=>{
+        await db.query('INSERT INTO bank_statement_lines (id,school_id,bank_account_id,transaction_date,description,reference,amount,imported_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8),($9,$2,$3,$4,$10,$11,$7,$12)',[
+          statementOne,schoolId,bankId,'2026-03-01','Deposit one','REF-1','55.00','a'.repeat(64),
+          statementTwo,'Deposit duplicate','REF-2','b'.repeat(64),
+        ]);
+      });
+      const mismatch=await post({statementLineId:statementOne,journalLineId:lineIds[0]});
+      expect(mismatch.status).toBe(422);
+      expect(mismatch.body.error).toContain('amount does not equal');
+      const stillUnmatched=await withSchoolTransaction(schoolId,db=>db.query('SELECT matched_at FROM bank_statement_lines WHERE school_id=$1 AND id=$2',[schoolId,statementOne]));
+      expect(stillUnmatched.rows[0].matched_at).toBeNull();
+      // The statement amount is 55.00; use the cash debit line to match it.
+      const matched=await post({statementLineId:statementOne,journalLineId:lineIds[0]});
+      expect(matched.status).toBe(200);
+      expect(matched.body.matched).toBe(true);
+      const duplicate=await post({statementLineId:statementTwo,journalLineId:lineIds[0]});
+      expect(duplicate.status).toBe(409);
+      expect(duplicate.body.error).toContain('already been reconciled');
+      const finalState=await withSchoolTransaction(schoolId,db=>db.query('SELECT count(*) FILTER (WHERE matched_at IS NOT NULL)::int AS matched,count(*) FILTER (WHERE matched_at IS NULL)::int AS unmatched FROM bank_statement_lines WHERE school_id=$1 AND bank_account_id=$2',[schoolId,bankId]));
+      expect(finalState.rows[0]).toMatchObject({matched:1,unmatched:1});
+    }finally{
+      await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
+    }
+  });
+
+
   it('enforces class fee structure isolation and prevents duplicate invoices per student and structure', async () => {
     const schoolId=randomUUID();
     const otherSchoolId=randomUUID();
