@@ -175,13 +175,14 @@ const feeStructureSchema=z.object({
   className:z.string().trim().min(1).max(80),
   academicYear:z.string().trim().min(2).max(30),
   termName:z.string().trim().min(1).max(40),
+  academicTermId:z.string().uuid().optional(),
   dueOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   items:z.array(z.object({itemName:z.string().trim().min(1).max(100),amount:z.string().regex(/^\\d+(?:\\.\\d{1,2})?$/)})).min(1).max(100),
 });
 operationsRouter.get('/fees/structures',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
-    "SELECT f.id,f.class_name,f.academic_year,f.term_name,f.due_on,f.status,f.created_at,COALESCE(json_agg(json_build_object('id',i.id,'itemName',i.item_name,'amount',i.amount::text)) FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS items,COALESCE((SELECT count(*)::int FROM fee_invoices inv WHERE inv.school_id=f.school_id AND inv.fee_structure_id=f.id),0) AS invoices_created FROM fee_structures f LEFT JOIN fee_structure_items i ON i.school_id=f.school_id AND i.structure_id=f.id WHERE f.school_id=$1 GROUP BY f.id ORDER BY f.academic_year DESC,f.term_name,f.class_name",
+    "SELECT f.id,f.class_name,f.academic_year,f.term_name,f.academic_term_id,f.due_on,f.status,f.created_at,COALESCE(json_agg(json_build_object('id',i.id,'itemName',i.item_name,'amount',i.amount::text)) FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS items,COALESCE((SELECT count(*)::int FROM fee_invoices inv WHERE inv.school_id=f.school_id AND inv.fee_structure_id=f.id),0) AS invoices_created FROM fee_structures f LEFT JOIN fee_structure_items i ON i.school_id=f.school_id AND i.structure_id=f.id WHERE f.school_id=$1 GROUP BY f.id ORDER BY f.academic_year DESC,f.term_name,f.class_name",
     [auth.schoolId]));
   res.json({structures:result.rows});
 }));
@@ -195,10 +196,24 @@ operationsRouter.post('/fees/structures',requirePermission('fees.manage'),wrap(a
   try{
     const structure=await withSchoolTransaction(auth.schoolId,async c=>{
       const id=randomUUID();
-      await c.query("INSERT INTO fee_structures (id,school_id,class_name,academic_year,term_name,due_on,status,created_by) VALUES ($1,$2,$3,$4,$5,$6,'draft',$7)",[id,auth.schoolId,d.className,d.academicYear,d.termName,d.dueOn,auth.userId]);
+      let academicYear=d.academicYear;
+      let termName=d.termName;
+      if(d.academicTermId){
+        const term=await c.query(
+          "SELECT t.id,t.name AS term_name,t.starts_on,t.ends_on,t.status AS term_status,y.name AS year_name,y.status AS year_status FROM academic_terms t JOIN academic_years y ON y.school_id=t.school_id AND y.id=t.academic_year_id WHERE t.school_id=$1 AND t.id=$2",
+          [auth.schoolId,d.academicTermId],
+        );
+        if(!term.rowCount)throw Object.assign(new Error('Academic term not found in this school.'),{statusCode:404});
+        const t=term.rows[0];
+        if(t.term_status!=='open'||t.year_status!=='open')throw Object.assign(new Error('Choose an open academic year and term.'),{statusCode:409});
+        const start=String(t.starts_on).slice(0,10),end=String(t.ends_on).slice(0,10);
+        if(d.dueOn<start||d.dueOn>end)throw Object.assign(new Error('The fee due date must fall within the selected academic term.'),{statusCode:422});
+        academicYear=String(t.year_name);termName=String(t.term_name);
+      }
+      await c.query("INSERT INTO fee_structures (id,school_id,class_name,academic_year,term_name,academic_term_id,due_on,status,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8)",[id,auth.schoolId,d.className,academicYear,termName,d.academicTermId??null,d.dueOn,auth.userId]);
       for(const item of items)await c.query("INSERT INTO fee_structure_items (id,school_id,structure_id,item_name,amount) VALUES ($1,$2,$3,$4,$5)",[randomUUID(),auth.schoolId,id,item.itemName,amountString(item.minor)]);
-      await audit(c,auth.schoolId,auth.userId,'fee.structure.create','fee_structure',id,{className:d.className,academicYear:d.academicYear,termName:d.termName,itemCount:items.length});
-      return {id,className:d.className,academicYear:d.academicYear,termName:d.termName,dueOn:d.dueOn,status:'draft',items:items.map(item=>({itemName:item.itemName,amount:amountString(item.minor)}))};
+      await audit(c,auth.schoolId,auth.userId,'fee.structure.create','fee_structure',id,{className:d.className,academicYear,termName,academicTermId:d.academicTermId??null,itemCount:items.length});
+      return {id,className:d.className,academicYear,termName,academicTermId:d.academicTermId??null,dueOn:d.dueOn,status:'draft',items:items.map(item=>({itemName:item.itemName,amount:amountString(item.minor)}))};
     });
     res.status(201).json({structure});
   }catch(error){if(!handleError(res,error))throw error;}
@@ -227,6 +242,10 @@ operationsRouter.post('/fees/structures/:id/invoice-class',requirePermission('fe
       if(!structure.rowCount)throw Object.assign(new Error('Fee structure not found in this school.'),{statusCode:404});
       const f=structure.rows[0];
       if(f.status!=='active')throw Object.assign(new Error('Activate the fee structure before bulk invoicing.'),{statusCode:409});
+      if(f.academic_term_id){
+        const term=await c.query("SELECT t.status AS term_status,y.status AS year_status FROM academic_terms t JOIN academic_years y ON y.school_id=t.school_id AND y.id=t.academic_year_id WHERE t.school_id=$1 AND t.id=$2",[auth.schoolId,f.academic_term_id]);
+        if(!term.rowCount||term.rows[0].term_status!=='open'||term.rows[0].year_status!=='open')throw Object.assign(new Error('Cannot bulk invoice against a closed or missing academic term.'),{statusCode:409});
+      }
       if(String(f.due_on)<issuedOn)throw Object.assign(new Error('The structure due date is before today; update the structure or use a valid due date.'),{statusCode:422});
       const items=await c.query("SELECT item_name,amount::text FROM fee_structure_items WHERE school_id=$1 AND structure_id=$2 ORDER BY item_name",[auth.schoolId,id.data]);
       if(!items.rowCount)throw Object.assign(new Error('This fee structure has no items.'),{statusCode:422});
