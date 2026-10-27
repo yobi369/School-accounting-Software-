@@ -1228,7 +1228,7 @@ operationsRouter.get('/reports/fee-balances',requirePermission('reports.read'),w
      FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
      LEFT JOIN fee_receipt_allocations a ON a.school_id=i.school_id AND a.invoice_id=i.id
      LEFT JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
-     WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR i.academic_term_id=$4::uuid)
+     WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
      GROUP BY i.id,s.id HAVING i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>0
      ORDER BY i.due_on,s.full_name LIMIT 2000`,[auth.schoolId,dates.from,dates.to,academicTermId]));
   res.json({report:'fee-balances',currency:'KES',rows:result.rows});
@@ -1282,12 +1282,12 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
       sql=`SELECT r.receipt_number,r.received_on,s.admission_number,s.full_name AS student,r.amount::text,r.payment_method,r.external_reference,r.status
        FROM fee_receipts r JOIN students s ON s.id=r.student_id AND s.school_id=r.school_id
        WHERE r.school_id=$1 AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
-       AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND i.academic_term_id=$4::uuid))
+       AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid))
        ORDER BY r.received_on DESC,r.receipt_number LIMIT 5000`;break;
     case 'invoice-register':
       sql=`SELECT i.invoice_number,i.issued_on,i.due_on,s.admission_number,s.full_name AS student,i.academic_year,i.amount::text,i.status
        FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
-       WHERE i.school_id=$1 AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR i.academic_term_id=$4::uuid)
+       WHERE i.school_id=$1 AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
        ORDER BY i.issued_on DESC,i.invoice_number LIMIT 5000`;break;
     case 'fee-balances':
       sql=`SELECT s.admission_number,s.full_name,i.invoice_number,i.academic_year,i.issued_on,i.due_on,i.amount::text,
