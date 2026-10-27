@@ -1331,12 +1331,13 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
        WHERE j.school_id=$1 AND j.status='posted' AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
        GROUP BY j.id ORDER BY j.posting_date DESC,j.entry_number DESC LIMIT 5000`;break;
     case 'collections-by-method':
-      sql=`SELECT payment_method,count(*)::int AS receipt_count,sum(amount)::text AS collected
-       FROM fee_receipts r WHERE school_id=$1 AND status='posted' AND ($2::date IS NULL OR received_on >= $2::date) AND ($3::date IS NULL OR received_on <= $3::date)
-       AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid)))
-       GROUP BY payment_method ORDER BY payment_method`;break;
+      sql=`SELECT r.payment_method,count(DISTINCT r.id)::int AS receipt_count,
+       COALESCE(sum(CASE WHEN $4::uuid IS NULL THEN r.amount ELSE (SELECT COALESCE(sum(a.amount),0) FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid) END),0)::text AS collected
+       FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
+       AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid))
+       GROUP BY r.payment_method ORDER BY r.payment_method`;break;
     case 'fees-by-class':
-      sql=`SELECT COALESCE(s.class_name,'Unassigned') AS class_name,count(DISTINCT s.id)::int AS students,
+      sql=`SELECT COALESCE(s.class_name,'Unassigned') AS class_name,count(DISTINCT CASE WHEN $2::uuid IS NULL THEN s.id ELSE i.student_id END)::int AS students,
        COALESCE(sum(i.amount),0)::text AS invoiced
        FROM students s LEFT JOIN fee_invoices i ON i.school_id=s.school_id AND i.student_id=s.id AND i.status<>'void' AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$2::uuid))
        WHERE s.school_id=$1 GROUP BY s.class_name ORDER BY s.class_name`;break;
