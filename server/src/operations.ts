@@ -94,7 +94,7 @@ export const studentSchema=z.object({
   fullName:z.string().trim().min(2).max(160),
   className:z.string().trim().max(80).optional(),
   sex:z.enum(['female','male','other','prefer_not_to_say']).optional().or(z.literal('')),
-  dateOfBirth:z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/).refine(v=>!Number.isNaN(Date.parse(v))&&new Date(v).toISOString().slice(0,10)===v&&v<=new Date().toISOString().slice(0,10),'Enter a valid date of birth that is not in the future.').optional().or(z.literal('')),
+  dateOfBirth:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>!Number.isNaN(Date.parse(v))&&new Date(v).toISOString().slice(0,10)===v&&v<=new Date().toISOString().slice(0,10),'Enter a valid date of birth that is not in the future.').optional().or(z.literal('')),
   guardianName:z.string().trim().max(160).optional(),
   guardianRelationship:z.string().trim().max(80).optional(),
   guardianPhone:z.string().trim().max(40).optional(),
