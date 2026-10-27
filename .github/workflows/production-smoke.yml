@@ -1,10 +1,9 @@
 name: Production smoke test
 on:
+  # Run against the hosted service after every main update so a green build
+  # cannot silently leave the deployed app broken.
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/production-smoke.yml'
-      - 'scripts/smoke-deployment.sh'
   schedule:
     - cron: '17 */6 * * *'
   workflow_dispatch:
