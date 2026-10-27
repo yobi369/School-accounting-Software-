@@ -2,6 +2,7 @@ export type OfflineExpenseDraft = {
   expenseNumber: string;
   supplierId?: string;
   expenseAccountId: string;
+  academicTermId?: string;
   category: string;
   description: string;
   incurredOn?: string;

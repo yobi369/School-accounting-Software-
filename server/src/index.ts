@@ -5,6 +5,9 @@ import { z } from 'zod';
 import { authContext, createSession, hashPassword, hashToken, requireAuth, requirePermission, safeSecretEquals, verifyPassword } from './auth.js';
 import { pool, requirePool, withSchoolTransaction } from './db.js';
 import { operationsRouter } from './operations.js';
+import { studentProfileEditRouter } from './student-profile-edit.js';
+import { academicTermsRouter } from './academic-terms.js';
+import { payrollRouter } from './payroll.js';
 import { formatMinorUnitsKes, parseKesToMinorUnits, validateJournal } from './domain/ledger.js';
 
 const app = express();
@@ -138,16 +141,16 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
         'school.manage','users.manage','bank.manage','students.read','students.create','students.manage','fees.read','fees.manage',
         'receipts.create','ledger.read','ledger.post','expenses.read','expenses.create',
         'expenses.approve','expenses.pay','bank.read','bank.reconcile','reports.read','reports.export',
-        'periods.manage','audit.read',
+        'periods.manage','audit.read','payroll.read','payroll.manage','payroll.approve','payroll.pay',
       ];
       for (const code of permissionCodes) {
         await client.query('INSERT INTO permissions (code,description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING', [code, code.replaceAll('.', ' ')]);
       }
       const rolePermissions: Record<string, string[]> = {
         school_admin: permissionCodes,
-        bursar: ['students.read','fees.read','fees.manage','receipts.create','reports.read'],
-        accountant: ['students.read','fees.read','receipts.create','ledger.read','ledger.post','expenses.read','expenses.create','bank.read','bank.reconcile','reports.read','reports.export','audit.read'],
-        approver: ['expenses.read','expenses.approve','expenses.pay','reports.read'],
+        accountant: ['students.read','fees.read','receipts.create','ledger.read','ledger.post','expenses.read','expenses.create','bank.read','bank.reconcile','reports.read','reports.export','audit.read','payroll.read','payroll.pay'],
+        bursar: ['students.read','fees.read','fees.manage','receipts.create','reports.read','payroll.read','payroll.manage','payroll.pay'],
+        approver: ['expenses.read','expenses.approve','expenses.pay','reports.read','payroll.approve'],
         auditor: ['students.read','fees.read','ledger.read','expenses.read','bank.read','reports.read','reports.export','audit.read'],
       };
       const roleIds: Record<string,string> = {};
@@ -552,6 +555,9 @@ app.post('/api/v1/dev/validate-journal', (req,res) => {
   } catch(error) { res.status(422).json({valid:false,error:error instanceof Error?error.message:'Journal validation failed',posted:false}); }
 });
 
+app.use('/api/v1', studentProfileEditRouter);
+app.use('/api/v1', academicTermsRouter);
+app.use('/api/v1', payrollRouter);
 app.use('/api/v1', operationsRouter);
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(resolve(process.cwd(), 'dist'), { index: false, maxAge: '1h' }));
@@ -562,6 +568,11 @@ if (process.env.NODE_ENV === 'production') {
 }
 app.use((_req,res) => { res.status(404).json({error:'Not found'}); });
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const statusCode = (error as { statusCode?: unknown })?.statusCode;
+  if (typeof statusCode === 'number' && Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 499) {
+    res.status(statusCode).json({ error: error instanceof Error ? error.message : 'Request rejected.' });
+    return;
+  }
   const code = (error as { code?: string })?.code;
   if (code === '23505') { res.status(409).json({error:'A record with these unique details already exists.'}); return; }
   if (code === '23503' || code === '23514' || code === '55000') { res.status(422).json({error:'The financial operation violates an accounting or data-integrity rule.'}); return; }
