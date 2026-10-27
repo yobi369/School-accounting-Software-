@@ -583,11 +583,13 @@ operationsRouter.post('/bank/reconcile',requirePermission('bank.reconcile'),wrap
   try{
     const result=await withSchoolTransaction(auth.schoolId,async c=>{
       const stmt=await c.query('SELECT * FROM bank_statement_lines WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,p.data.statementLineId]);
-      const jl=await c.query('SELECT l.*,j.posting_date,j.status FROM journal_lines l JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id WHERE l.school_id=$1 AND l.id=$2',[auth.schoolId,p.data.journalLineId]);
+      const jl=await c.query('SELECT l.*,j.posting_date,j.status FROM journal_lines l JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id WHERE l.school_id=$1 AND l.id=$2 FOR UPDATE OF l',[auth.schoolId,p.data.journalLineId]);
       if(!stmt.rowCount||!jl.rowCount)throw Object.assign(new Error('Statement line or ledger line was not found in this school.'),{statusCode:404});
       const s=stmt.rows[0],l=jl.rows[0];
       const bank=await c.query('SELECT ledger_account_id FROM bank_accounts WHERE school_id=$1 AND id=$2',[auth.schoolId,s.bank_account_id]);
       if(s.matched_at||l.status!=='posted'||l.account_id!==bank.rows[0]?.ledger_account_id)throw Object.assign(new Error('Only an unmatched statement line and a posted ledger line for the mapped bank account can be reconciled.'),{statusCode:409});
+      const existingMatch=await c.query('SELECT id FROM bank_statement_lines WHERE school_id=$1 AND matched_journal_line_id=$2 LIMIT 1',[auth.schoolId,l.id]);
+      if(existingMatch.rowCount)throw Object.assign(new Error('This ledger line has already been reconciled to another statement line.'),{statusCode:409});
       const ledgerMinor=parseKesToMinorUnits(String(l.debit))-parseKesToMinorUnits(String(l.credit));
       const statementRaw=String(s.amount);const statementMinor=statementRaw.startsWith('-')?-parseKesToMinorUnits(statementRaw.slice(1)):parseKesToMinorUnits(statementRaw);
       if(ledgerMinor!==statementMinor)throw Object.assign(new Error('Statement amount does not equal the selected ledger line.'),{statusCode:422});
