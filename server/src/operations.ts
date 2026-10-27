@@ -1328,12 +1328,12 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
     case 'expense-register':
       sql=`SELECT e.expense_number,e.incurred_on,e.category,e.description,e.amount::text,e.status,s.name AS supplier
        FROM expenses e LEFT JOIN suppliers s ON s.id=e.supplier_id AND s.school_id=e.school_id
-       WHERE e.school_id=$1 AND ($2::date IS NULL OR e.incurred_on >= $2::date) AND ($3::date IS NULL OR e.incurred_on <= $3::date)
+       WHERE e.school_id=$1 AND ($2::date IS NULL OR e.incurred_on >= $2::date) AND ($3::date IS NULL OR e.incurred_on <= $3::date) AND ($4::uuid IS NULL OR e.academic_term_id=$4::uuid)
        ORDER BY e.incurred_on DESC,e.expense_number LIMIT 5000`;break;
     case 'supplier-payables':
       sql=`SELECT COALESCE(s.name,'Unspecified supplier') AS supplier,e.expense_number,e.description,e.incurred_on,e.amount::text,e.status
        FROM expenses e LEFT JOIN suppliers s ON s.id=e.supplier_id AND s.school_id=e.school_id
-       WHERE e.school_id=$1 AND e.status='approved' ORDER BY e.incurred_on,e.expense_number LIMIT 5000`;break;
+       WHERE e.school_id=$1 AND e.status='approved' AND ($4::uuid IS NULL OR e.academic_term_id=$4::uuid) ORDER BY e.incurred_on,e.expense_number LIMIT 5000`;break;
     case 'bank-reconciliation':
       sql=`SELECT b.name AS bank_account,l.transaction_date,l.description,l.reference,l.amount::text,l.matched_at,l.matched_journal_line_id
        FROM bank_statement_lines l JOIN bank_accounts b ON b.id=l.bank_account_id AND b.school_id=l.school_id
