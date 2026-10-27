@@ -93,13 +93,20 @@ const studentSchema=z.object({
   admissionNumber:z.string().trim().min(1).max(40),
   fullName:z.string().trim().min(2).max(160),
   className:z.string().trim().max(80).optional(),
+  sex:z.enum(['female','male','other','prefer_not_to_say']).optional().or(z.literal('')),
+  dateOfBirth:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>!Number.isNaN(Date.parse(v))&&new Date(v).toISOString().slice(0,10)===v,'Enter a valid date of birth.').optional().or(z.literal('')),
   guardianName:z.string().trim().max(160).optional(),
+  guardianRelationship:z.string().trim().max(80).optional(),
   guardianPhone:z.string().trim().max(40).optional(),
+  guardianAlternatePhone:z.string().trim().max(40).optional(),
+  homeAddress:z.string().trim().max(300).optional(),
+  emergencyContactName:z.string().trim().max(160).optional(),
+  emergencyContactPhone:z.string().trim().max(40).optional(),
 });
 operationsRouter.get('/students',requirePermission('students.read'),wrap(async(req,res)=>{
   const auth=authContext(req); const q=typeof req.query.q==='string'?req.query.q.trim().slice(0,100):'';
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
-    `SELECT id,admission_number,full_name,class_name,guardian_name,guardian_phone,status,created_at
+    `SELECT id,admission_number,full_name,class_name,sex,date_of_birth,guardian_name,guardian_relationship,guardian_phone,guardian_alternate_phone,home_address,emergency_contact_name,emergency_contact_phone,status,created_at
      FROM students WHERE school_id=$1 AND ($2='' OR admission_number ILIKE '%'||$2||'%' OR full_name ILIKE '%'||$2||'%')
      ORDER BY full_name LIMIT 500`,[auth.schoolId,q]));
   res.json({students:result.rows});
@@ -109,7 +116,7 @@ operationsRouter.get('/students/:studentId/financial-account',requirePermission(
   if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(studentId)){res.status(400).json({error:'Invalid student ID.'});return;}
   const result=await withSchoolTransaction(auth.schoolId,async c=>{
     const student=await c.query(
-      'SELECT id,admission_number,full_name,class_name,guardian_name,guardian_phone,status FROM students WHERE school_id=$1 AND id=$2',
+      'SELECT id,admission_number,full_name,class_name,sex,date_of_birth,guardian_name,guardian_relationship,guardian_phone,guardian_alternate_phone,home_address,emergency_contact_name,emergency_contact_phone,status FROM students WHERE school_id=$1 AND id=$2',
       [auth.schoolId,studentId]);
     if(!student.rowCount)return null;
     const transactions=await c.query(
@@ -156,8 +163,8 @@ operationsRouter.post('/students',requirePermission('students.manage'),wrap(asyn
   const auth=authContext(req); const d=parsed.data;
   const student=await withSchoolTransaction(auth.schoolId,async c=>{
     const r=await c.query(
-      'INSERT INTO students (school_id,admission_number,full_name,class_name,guardian_name,guardian_phone) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,admission_number,full_name,class_name,status,created_at',
-      [auth.schoolId,d.admissionNumber,d.fullName,d.className??null,d.guardianName??null,d.guardianPhone??null]);
+      'INSERT INTO students (school_id,admission_number,full_name,class_name,sex,date_of_birth,guardian_name,guardian_relationship,guardian_phone,guardian_alternate_phone,home_address,emergency_contact_name,emergency_contact_phone) VALUES ($1,$2,$3,$4,$5,$6::date,$7,$8,$9,$10,$11,$12,$13) RETURNING id,admission_number,full_name,class_name,sex,date_of_birth,guardian_name,guardian_relationship,guardian_phone,guardian_alternate_phone,home_address,emergency_contact_name,emergency_contact_phone,status,created_at',
+      [auth.schoolId,d.admissionNumber,d.fullName,d.className||null,d.sex||null,d.dateOfBirth||null,d.guardianName||null,d.guardianRelationship||null,d.guardianPhone||null,d.guardianAlternatePhone||null,d.homeAddress||null,d.emergencyContactName||null,d.emergencyContactPhone||null]);
     await audit(c,auth.schoolId,auth.userId,'student.create','student',r.rows[0].id);
     return r.rows[0];
   });
