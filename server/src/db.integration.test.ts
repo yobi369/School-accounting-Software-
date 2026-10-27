@@ -263,6 +263,36 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
     }
   });
+
+  it('enforces class fee structure isolation and prevents duplicate invoices per student and structure', async () => {
+    const schoolId=randomUUID();
+    const otherSchoolId=randomUUID();
+    const studentId=randomUUID();
+    const structureId=randomUUID();
+    const invoiceId=randomUUID();
+    const code='FS'+randomUUID().replaceAll('-','').slice(0,10).toUpperCase();
+    const otherCode='FS'+randomUUID().replaceAll('-','').slice(0,10).toUpperCase();
+    await withSchoolTransaction(schoolId,async c=>{
+      await c.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[schoolId,'Fee Structure Test School',code]);
+      await c.query('INSERT INTO students (id,school_id,admission_number,full_name,class_name) VALUES ($1,$2,$3,$4,$5)',[studentId,schoolId,'FS-TEST-001','Fee Structure Student','Grade 4']);
+      await c.query("INSERT INTO fee_structures (id,school_id,class_name,academic_year,term_name,due_on,status) VALUES ($1,$2,'Grade 4','2026','Term 1','2026-11-30','active')",[structureId,schoolId]);
+      await c.query("INSERT INTO fee_structure_items (id,school_id,structure_id,item_name,amount) VALUES ($1,$2,$3,'Tuition','1500.00')",[randomUUID(),schoolId,structureId]);
+      await c.query("INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,due_on,amount,fee_structure_id) VALUES ($1,$2,$3,'FS-TEST-INVOICE-1','2026','Tuition','2026-11-30','1500.00',$4)",[invoiceId,schoolId,studentId,structureId]);
+    });
+    await expect(withSchoolTransaction(schoolId,c=>c.query(
+      "INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,due_on,amount,fee_structure_id) VALUES ($1,$2,$3,'FS-TEST-INVOICE-2','2026','Tuition','2026-11-30','1500.00',$4)",
+      [randomUUID(),schoolId,studentId,structureId]
+    ))).rejects.toThrow();
+    await withSchoolTransaction(otherSchoolId,async c=>{
+      await c.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[otherSchoolId,'Other Fee Structure School',otherCode]);
+      await c.query("INSERT INTO fee_structures (id,school_id,class_name,academic_year,term_name,due_on,status) VALUES ($1,$2,'Grade 4','2026','Term 1','2026-11-30','draft')",[randomUUID(),otherSchoolId]);
+    });
+    const isolated=await withSchoolTransaction(schoolId,c=>c.query('SELECT id FROM fee_structures WHERE school_id=$1',[otherSchoolId]));
+    expect(isolated.rowCount).toBe(0);
+    const invoiceCount=await withSchoolTransaction(schoolId,c=>c.query('SELECT count(*)::int AS n FROM fee_invoices WHERE school_id=$1 AND fee_structure_id=$2',[schoolId,structureId]));
+    expect(invoiceCount.rows[0].n).toBe(1);
+  });
+
 });
 
 afterAll(async () => { await pool?.end(); });
