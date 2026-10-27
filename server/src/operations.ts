@@ -469,23 +469,31 @@ operationsRouter.post('/sync/push',requirePermission('expenses.create'),wrap(asy
 
 operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(req,res)=>{
   const auth=authContext(req);
+  const dates=reportDateFilters(req,res);if(!dates)return;
   const data=await withSchoolTransaction(auth.schoolId,async c=>{
     const fees=await c.query(
-      `SELECT COALESCE((SELECT sum(amount) FROM fee_receipts WHERE school_id=$1 AND status='posted'),0)::text AS collected,
-       COALESCE((SELECT sum(i.amount-COALESCE(a.allocated,0)) FROM fee_invoices i LEFT JOIN
-        (SELECT invoice_id,sum(a.amount) AS allocated FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND r.status='posted' GROUP BY invoice_id) a ON a.invoice_id=i.id
-        WHERE i.school_id=$1 AND i.status<>'void'),0)::text AS outstanding`,[auth.schoolId]);
+      `SELECT
+       COALESCE((SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)),0)::text AS billed,
+       COALESCE((SELECT sum(r.amount) FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)),0)::text AS collected,
+       COALESCE((SELECT sum(i.amount-COALESCE(a.allocated,0)-COALESCE(a.waived,0)) FROM fee_invoices i LEFT JOIN
+        (SELECT a.invoice_id,sum(a.amount) AS allocated FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND r.status='posted' GROUP BY a.invoice_id) a ON a.invoice_id=i.id LEFT JOIN
+        (SELECT invoice_id,sum(amount) AS waived FROM fee_waivers WHERE school_id=$1 AND status='posted' GROUP BY invoice_id) w ON w.invoice_id=i.id
+        WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)),0)::text AS outstanding,
+       CASE WHEN COALESCE((SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)),0)=0 THEN '0'
+       ELSE round(100.0*COALESCE((SELECT sum(r.amount) FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)),0)/
+       (SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)),2)::text END AS collection_percent`,
+      [auth.schoolId,dates.from,dates.to]);
     const expenses=await c.query(
       `SELECT count(*) FILTER (WHERE status='submitted')::int AS awaiting_approval,
        count(*) FILTER (WHERE status='approved')::int AS approved_unpaid,
-       COALESCE(sum(amount) FILTER (WHERE status='paid'),0)::text AS paid_total FROM expenses WHERE school_id=$1`,[auth.schoolId]);
+       COALESCE(sum(amount) FILTER (WHERE status='paid' AND ($2::date IS NULL OR paid_at::date >= $2::date) AND ($3::date IS NULL OR paid_at::date <= $3::date)),0)::text AS paid_total
+       FROM expenses WHERE school_id=$1`,[auth.schoolId,dates.from,dates.to]);
     const bank=await c.query("SELECT count(*)::int AS unmatched FROM bank_statement_lines WHERE school_id=$1 AND matched_at IS NULL",[auth.schoolId]);
-    const journals=await c.query("SELECT count(*)::int AS posted_count FROM journal_entries WHERE school_id=$1 AND status='posted'",[auth.schoolId]);
-    return {fees:fees.rows[0],expenses:expenses.rows[0],unmatchedBankLines:bank.rows[0].unmatched,postedJournals:journals.rows[0].posted_count};
+    const journals=await c.query("SELECT count(*)::int AS posted_count FROM journal_entries WHERE school_id=$1 AND status='posted' AND ($2::date IS NULL OR posting_date >= $2::date) AND ($3::date IS NULL OR posting_date <= $3::date)",[auth.schoolId,dates.from,dates.to]);
+    return {fees:fees.rows[0],expenses:expenses.rows[0],unmatchedBankLines:bank.rows[0].unmatched,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to}};
   });
   res.json({schoolId:auth.schoolId,summary:data});
 }));
-
 
 const openingBalanceSchema=z.object({financialYearId:z.string().uuid(),postingDate:z.string().regex(/^\d{4}-\d{2}-\d{2}$/),description:z.string().trim().min(3).max(500),lines:z.array(z.object({accountId:z.string().uuid(),debit:z.string(),credit:z.string(),memo:z.string().max(500).optional()})).min(2).max(500)});
 operationsRouter.post('/accounting/opening-balances',requirePermission('school.manage'),wrap(async(req,res)=>{
