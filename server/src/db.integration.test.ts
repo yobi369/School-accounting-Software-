@@ -303,6 +303,69 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
     expect(invoiceCount.rows[0].n).toBe(1);
   });
 
+
+  it('filters invoice reports and CSV exports by school-scoped academic term', async () => {
+    const schoolId=randomUUID(), userId=randomUUID(), roleId=randomUUID();
+    const studentId=randomUUID(), yearId=randomUUID(), termOneId=randomUUID(), termTwoId=randomUUID();
+    const structureOneId=randomUUID(), structureTwoId=randomUUID();
+    const code='TERM'+randomUUID().replaceAll('-','').slice(0,8).toUpperCase();
+    await withSchoolTransaction(schoolId,async c=>{
+      await c.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[schoolId,'Academic Term Report School',code]);
+      await c.query('INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',[userId,'report-'+code.toLowerCase()+'@example.test','test-hash','Report Test User']);
+      await c.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[roleId,schoolId,'term_reporter']);
+      await c.query('INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,$4)',[schoolId,userId,roleId,'active']);
+      for(const permission of ['reports.read','reports.export']){
+        await c.query('INSERT INTO permissions (code,description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING',[permission,permission]);
+        await c.query('INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING',[roleId,permission]);
+      }
+      await c.query('INSERT INTO academic_years (id,school_id,name,starts_on,ends_on,created_by) VALUES ($1,$2,$3,$4,$5,$6)',[yearId,schoolId,'2026 Academic Year','2026-01-01','2026-12-31',userId]);
+      await c.query('INSERT INTO academic_terms (id,school_id,academic_year_id,name,starts_on,ends_on,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7),($8,$2,$3,$9,$10,$11,$7)',[
+        termOneId,schoolId,yearId,'Term 1','2026-01-01','2026-03-31',userId,
+        termTwoId,'Term 2','2026-04-01','2026-06-30',
+      ]);
+      await c.query('INSERT INTO students (id,school_id,admission_number,full_name,class_name) VALUES ($1,$2,$3,$4,$5)',[studentId,schoolId,'TERM-001','Term Filter Student','Grade 4']);
+      await c.query("INSERT INTO fee_structures (id,school_id,class_name,academic_year,term_name,academic_term_id,due_on,status) VALUES ($1,$2,'Grade 4','2026 Academic Year','Term 1',$3,'2026-03-20','active'),($4,$2,'Grade 4','2026 Academic Year','Term 2',$5,'2026-06-20','active')",[structureOneId,schoolId,termOneId,structureTwoId,termTwoId]);
+      await c.query("INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,issued_on,due_on,amount,status,fee_structure_id) VALUES ($1,$2,$3,'TERM-INV-1','2026 Academic Year','Term 1 fees','2026-01-10','2026-03-20',1000,'issued',$4),($5,$2,$3,'TERM-INV-2','2026 Academic Year','Term 2 fees','2026-04-10','2026-06-20',2000,'issued',$6)",[
+        randomUUID(),schoolId,studentId,structureOneId,randomUUID(),structureTwoId,
+      ]);
+    });
+
+    const session=await createSession(userId,schoolId);
+    const app=express();app.use(express.json());app.use('/api/v1',operationsRouter);
+    const server=app.listen(0,'127.0.0.1');
+    try{
+      await new Promise<void>((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject);});
+      const address=server.address();
+      if(!address||typeof address==='string')throw new Error('Academic report test server did not bind to a TCP port.');
+      const base='http://127.0.0.1:'+address.port;
+      const headers={Authorization:'Bearer '+session.token};
+      const invoiceResponse=await fetch(base+'/api/v1/reports/invoice-register?academicTermId='+termOneId,{headers});
+      expect(invoiceResponse.status).toBe(200);
+      const invoiceReport=await invoiceResponse.json() as {rows:Array<{invoice_number:string}>};
+      expect(invoiceReport.rows.map(row=>row.invoice_number)).toEqual(['TERM-INV-1']);
+
+      const balanceResponse=await fetch(base+'/api/v1/reports/fee-balances?academicTermId='+termTwoId,{headers});
+      expect(balanceResponse.status).toBe(200);
+      const balanceReport=await balanceResponse.json() as {rows:Array<{invoice_number:string}>};
+      expect(balanceReport.rows.map(row=>row.invoice_number)).toEqual(['TERM-INV-2']);
+
+      const foreignTermResponse=await fetch(base+'/api/v1/reports/invoice-register?academicTermId='+randomUUID(),{headers});
+      expect(foreignTermResponse.status).toBe(200);
+      expect((await foreignTermResponse.json() as {rows:unknown[]}).rows).toHaveLength(0);
+
+      const invalidTermResponse=await fetch(base+'/api/v1/reports/invoice-register?academicTermId=not-a-uuid',{headers});
+      expect(invalidTermResponse.status).toBe(400);
+
+      const csvResponse=await fetch(base+'/api/v1/reports/invoice-register.csv?academicTermId='+termTwoId,{headers});
+      expect(csvResponse.status).toBe(200);
+      const csv=await csvResponse.text();
+      expect(csv).toContain('TERM-INV-2');
+      expect(csv).not.toContain('TERM-INV-1');
+    } finally {
+      await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
+    }
+  });
+
 });
 
 afterAll(async () => { await pool?.end(); });
