@@ -126,3 +126,27 @@ academicTermsRouter.post('/academic-terms/:id/close', requirePermission('periods
     res.json({academicTerm:term});
   } catch (error) { next(error); }
 });
+
+academicTermsRouter.post('/academic-years/:id/close', requirePermission('periods.manage'), async (req,res,next) => {
+  try {
+    const id = z.string().uuid().safeParse(req.params.id);
+    const body = z.object({reason:z.string().trim().min(8).max(500)}).safeParse(req.body);
+    if (!id.success || !body.success) { res.status(400).json({error:'A valid academic-year ID and closure reason of at least 8 characters are required.'}); return; }
+    const auth = authContext(req);
+    const year = await withSchoolTransaction(auth.schoolId, async c => {
+      const found = await c.query('SELECT id,status FROM academic_years WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,id.data]);
+      if (!found.rowCount) throw Object.assign(new Error('Academic year not found.'),{statusCode:404});
+      if (found.rows[0].status === 'closed') throw Object.assign(new Error('Academic year is already closed.'),{statusCode:409});
+      const openTerms = await c.query('SELECT count(*)::int AS count FROM academic_terms WHERE school_id=$1 AND academic_year_id=$2 AND status<>\'closed\'',[auth.schoolId,id.data]);
+      if (Number(openTerms.rows[0].count) > 0) throw Object.assign(new Error('Close all academic terms before closing the academic year.'),{statusCode:409});
+      const updated = await c.query(
+        `UPDATE academic_years SET status='closed',closed_at=now(),closed_by=$3
+         WHERE school_id=$1 AND id=$2 RETURNING id,name,status,closed_at`,
+        [auth.schoolId,id.data,auth.userId],
+      );
+      await writeAudit(c,auth.schoolId,auth.userId,'academic_year.close','academic_year',id.data,{reason:body.data.reason});
+      return updated.rows[0];
+    });
+    res.json({academicYear:year});
+  } catch (error) { next(error); }
+});
