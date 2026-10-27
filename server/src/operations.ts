@@ -570,9 +570,30 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
        WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)
        GROUP BY s.id HAVING sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0))>0
        ORDER BY sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0)) DESC LIMIT 5`,[auth.schoolId,dates.from,dates.to]);
-    const bank=await c.query("SELECT count(*)::int AS unmatched FROM bank_statement_lines WHERE school_id=$1 AND matched_at IS NULL",[auth.schoolId]);
+    const feeCollectionTrend=await c.query(
+       `SELECT to_char(date_trunc('month',r.received_on),'YYYY-MM') AS month,
+          sum(r.amount)::numeric(14,2)::text AS collected
+        FROM fee_receipts r
+        WHERE r.school_id=$1 AND r.status='posted'
+          AND ($2::date IS NULL OR r.received_on >= $2::date)
+          AND ($3::date IS NULL OR r.received_on <= $3::date)
+        GROUP BY date_trunc('month',r.received_on)
+        ORDER BY date_trunc('month',r.received_on)`,[auth.schoolId,dates.from,dates.to]);
+     const incomeExpenseTrend=await c.query(
+       `SELECT to_char(date_trunc('month',j.posting_date),'YYYY-MM') AS month,
+          COALESCE(sum(CASE WHEN a.account_type='income' THEN l.credit-l.debit ELSE 0 END),0)::numeric(14,2)::text AS income,
+          COALESCE(sum(CASE WHEN a.account_type='expense' THEN l.debit-l.credit ELSE 0 END),0)::numeric(14,2)::text AS expenses
+        FROM journal_entries j
+        JOIN journal_lines l ON l.school_id=j.school_id AND l.journal_entry_id=j.id
+        JOIN accounts a ON a.school_id=l.school_id AND a.id=l.account_id
+        WHERE j.school_id=$1 AND j.status='posted' AND a.account_type IN ('income','expense')
+          AND ($2::date IS NULL OR j.posting_date >= $2::date)
+          AND ($3::date IS NULL OR j.posting_date <= $3::date)
+        GROUP BY date_trunc('month',j.posting_date)
+        ORDER BY date_trunc('month',j.posting_date)`,[auth.schoolId,dates.from,dates.to]);
+     const bank=await c.query("SELECT count(*)::int AS unmatched FROM bank_statement_lines WHERE school_id=$1 AND matched_at IS NULL",[auth.schoolId]);
     const journals=await c.query("SELECT count(*)::int AS posted_count FROM journal_entries WHERE school_id=$1 AND status='posted' AND ($2::date IS NULL OR posting_date >= $2::date) AND ($3::date IS NULL OR posting_date <= $3::date)",[auth.schoolId,dates.from,dates.to]);
-    return {fees:fees.rows[0],expenses:expenses.rows[0],recentPayments:recentPayments.rows,pendingApprovals:pendingApprovals.rows,topOutstanding:topOutstanding.rows,unmatchedBankLines:bank.rows[0].unmatched,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to}};
+    return {fees:fees.rows[0],expenses:expenses.rows[0],recentPayments:recentPayments.rows,pendingApprovals:pendingApprovals.rows,topOutstanding:topOutstanding.rows,feeCollectionTrend:feeCollectionTrend.rows,incomeExpenseTrend:incomeExpenseTrend.rows,unmatchedBankLines:bank.rows[0].unmatched,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to}};
   });
   res.json({schoolId:auth.schoolId,summary:data});
 }));
