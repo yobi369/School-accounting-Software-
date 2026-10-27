@@ -659,7 +659,7 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
        CASE WHEN COALESCE((SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),0)=0 THEN '0'
        ELSE round(100.0*COALESCE(CASE WHEN $4::uuid IS NULL THEN (SELECT sum(r.amount) FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)) ELSE (SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=$1 AND r.status='posted' AND fs.academic_term_id=$4::uuid AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)) END,0)/
        (SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)),2)::text END AS collection_percent`,
-      [auth.schoolId,dates.from,dates.to]);
+      [auth.schoolId,dates.from,dates.to,academicTermId]);
     const expenses=await c.query(
       `SELECT count(*) FILTER (WHERE status='submitted')::int AS awaiting_approval,
        count(*) FILTER (WHERE status='approved')::int AS approved_unpaid,
