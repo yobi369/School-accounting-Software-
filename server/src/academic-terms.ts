@@ -18,7 +18,7 @@ const termSchema = z.object({
   startsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   endsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 });
-function validRange(start: string, end: string): boolean {
+export function isValidDateRange(start: string, end: string): boolean {
   const s = Date.parse(start + 'T00:00:00Z');
   const e = Date.parse(end + 'T00:00:00Z');
   return Number.isFinite(s) && Number.isFinite(e) && start <= end &&
@@ -53,7 +53,7 @@ academicTermsRouter.post('/academic-years', requirePermission('periods.manage'),
     const parsed = yearSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({error:'Invalid academic-year details.',details:parsed.error.flatten()}); return; }
     const d = parsed.data;
-    if (!validRange(d.startsOn,d.endsOn)) { res.status(422).json({error:'Academic-year start must be on or before its end and both must be real calendar dates.'}); return; }
+    if (!isValidDateRange(d.startsOn,d.endsOn)) { res.status(422).json({error:'Academic-year start must be on or before its end and both must be real calendar dates.'}); return; }
     const auth = authContext(req);
     const year = await withSchoolTransaction(auth.schoolId, async c => {
       const overlap = await c.query(
