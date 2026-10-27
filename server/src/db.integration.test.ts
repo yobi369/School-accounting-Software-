@@ -311,9 +311,9 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       };
       const statementOne=randomUUID(),statementTwo=randomUUID();
       await withSchoolTransaction(schoolId,async db=>{
-        await db.query('INSERT INTO bank_statement_lines (id,school_id,bank_account_id,transaction_date,description,reference,amount,imported_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8),($9,$2,$3,$4,$10,$11,$7,$12)',[
-          statementOne,schoolId,bankId,'2026-03-01','Deposit one','REF-1','55.00','a'.repeat(64),
-          statementTwo,'Deposit duplicate','REF-2','b'.repeat(64),
+        await db.query('INSERT INTO bank_statement_lines (id,school_id,bank_account_id,transaction_date,description,reference,amount,imported_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8),($9,$2,$3,$4,$10,$11,$13,$12)',[
+          statementOne,schoolId,bankId,'2026-03-01','Deposit one','REF-1','54.99','a'.repeat(64),
+          statementTwo,'Deposit duplicate','REF-2','b'.repeat(64),'55.00',
         ]);
       });
       const mismatch=await post({statementLineId:statementOne,journalLineId:lineIds[0]});
@@ -321,7 +321,8 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       expect(mismatch.body.error).toContain('amount does not equal');
       const stillUnmatched=await withSchoolTransaction(schoolId,db=>db.query('SELECT matched_at FROM bank_statement_lines WHERE school_id=$1 AND id=$2',[schoolId,statementOne]));
       expect(stillUnmatched.rows[0].matched_at).toBeNull();
-      // The statement amount is 55.00; use the cash debit line to match it.
+      await withSchoolTransaction(schoolId,db=>db.query('UPDATE bank_statement_lines SET amount=55.00 WHERE school_id=$1 AND id=$2',[schoolId,statementOne]));
+      // The corrected statement amount is 55.00; use the cash debit line to match it.
       const matched=await post({statementLineId:statementOne,journalLineId:lineIds[0]});
       expect(matched.status).toBe(200);
       expect(matched.body.matched).toBe(true);
