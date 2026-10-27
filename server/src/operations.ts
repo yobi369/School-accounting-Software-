@@ -200,13 +200,14 @@ operationsRouter.post('/fees/structures/:id/activate',requirePermission('fees.ma
   const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid fee structure ID.'});return;}
   const auth=authContext(req);
   const result=await withSchoolTransaction(auth.schoolId,async c=>{
-    const row=await c.query("SELECT f.id,f.status,COALESCE(sum(i.amount),0)::text AS total,count(i.id)::int AS item_count FROM fee_structures f LEFT JOIN fee_structure_items i ON i.school_id=f.school_id AND i.structure_id=f.id WHERE f.school_id=$1 AND f.id=$2 GROUP BY f.id FOR UPDATE",[auth.schoolId,id.data]);
+    const row=await c.query("SELECT id,status FROM fee_structures WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
     if(!row.rowCount)throw Object.assign(new Error('Fee structure not found in this school.'),{statusCode:404});
     if(row.rows[0].status==='archived')throw Object.assign(new Error('Archived fee structures cannot be activated.'),{statusCode:409});
-    if(Number(row.rows[0].item_count)<1||parseKesToMinorUnits(String(row.rows[0].total))<=0n)throw Object.assign(new Error('Add at least one positive fee item before activation.'),{statusCode:422});
+    const totals=await c.query("SELECT COALESCE(sum(amount),0)::text AS total,count(*)::int AS item_count FROM fee_structure_items WHERE school_id=$1 AND structure_id=$2",[auth.schoolId,id.data]);
+    if(Number(totals.rows[0].item_count)<1||parseKesToMinorUnits(String(totals.rows[0].total))<=0n)throw Object.assign(new Error('Add at least one positive fee item before activation.'),{statusCode:422});
     await c.query("UPDATE fee_structures SET status='active' WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data]);
-    await audit(c,auth.schoolId,auth.userId,'fee.structure.activate','fee_structure',id.data,{itemCount:row.rows[0].item_count,total:row.rows[0].total});
-    return {id:id.data,status:'active',total:row.rows[0].total,itemCount:row.rows[0].item_count};
+    await audit(c,auth.schoolId,auth.userId,'fee.structure.activate','fee_structure',id.data,{itemCount:totals.rows[0].item_count,total:totals.rows[0].total});
+    return {id:id.data,status:'active',total:totals.rows[0].total,itemCount:totals.rows[0].item_count};
   });
   res.json({structure:result});
 }));
