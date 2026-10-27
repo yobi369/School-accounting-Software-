@@ -7,6 +7,7 @@ import { pool, requirePool, withSchoolTransaction } from './db.js';
 import { operationsRouter } from './operations.js';
 import { studentProfileEditRouter } from './student-profile-edit.js';
 import { academicTermsRouter } from './academic-terms.js';
+import { payrollRouter } from './payroll.js';
 import { formatMinorUnitsKes, parseKesToMinorUnits, validateJournal } from './domain/ledger.js';
 
 const app = express();
@@ -556,6 +557,7 @@ app.post('/api/v1/dev/validate-journal', (req,res) => {
 
 app.use('/api/v1', studentProfileEditRouter);
 app.use('/api/v1', academicTermsRouter);
+app.use('/api/v1', payrollRouter);
 app.use('/api/v1', operationsRouter);
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(resolve(process.cwd(), 'dist'), { index: false, maxAge: '1h' }));
