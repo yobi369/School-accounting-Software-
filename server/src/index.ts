@@ -148,7 +148,7 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
       }
       const rolePermissions: Record<string, string[]> = {
         school_admin: permissionCodes,
-        accountant: ['students.read','fees.read','receipts.create','ledger.read','ledger.post','expenses.read','expenses.create','bank.read','bank.reconcile','reports.read','reports.export','audit.read'],
+        accountant: ['students.read','fees.read','receipts.create','ledger.read','ledger.post','expenses.read','expenses.create','bank.read','bank.reconcile','reports.read','reports.export','audit.read','payroll.read','payroll.pay'],
         bursar: ['students.read','fees.read','fees.manage','receipts.create','reports.read','payroll.read','payroll.manage','payroll.pay'],
         approver: ['expenses.read','expenses.approve','expenses.pay','reports.read','payroll.approve'],
         auditor: ['students.read','fees.read','ledger.read','expenses.read','bank.read','reports.read','reports.export','audit.read'],
