@@ -1332,7 +1332,8 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
        GROUP BY j.id ORDER BY j.posting_date DESC,j.entry_number DESC LIMIT 5000`;break;
     case 'collections-by-method':
       sql=`SELECT payment_method,count(*)::int AS receipt_count,sum(amount)::text AS collected
-       FROM fee_receipts WHERE school_id=$1 AND status='posted' AND ($2::date IS NULL OR received_on >= $2::date) AND ($3::date IS NULL OR received_on <= $3::date)
+       FROM fee_receipts r WHERE school_id=$1 AND status='posted' AND ($2::date IS NULL OR received_on >= $2::date) AND ($3::date IS NULL OR received_on <= $3::date)
+       AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND i.academic_term_id=$4::uuid))
        GROUP BY payment_method ORDER BY payment_method`;break;
     case 'fees-by-class':
       sql=`SELECT COALESCE(s.class_name,'Unassigned') AS class_name,count(DISTINCT s.id)::int AS students,
@@ -1346,9 +1347,12 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
     default: throw Object.assign(new Error('Report not found.'),{statusCode:404});
   }
   const dateReports=['trial-balance','income-statement','general-ledger','cashbook','bankbook','receipts-register','invoice-register','fee-balances','expense-register','bank-reconciliation','journal-register','collections-by-method','audit-trail'];
+  const termReports=['receipts-register','invoice-register','fee-balances','fee-aging','collections-by-method','fees-by-class'];
   if(name==='balance-sheet')params=[schoolId,to];
-  else if(dateReports.includes(name))params=[schoolId,from,to,academicTermId];
-  else params=[schoolId,from,to,academicTermId];
+  else if(termReports.includes(name)&&dateReports.includes(name))params=[schoolId,from,to,academicTermId];
+  else if(termReports.includes(name))params=[schoolId,from,to,academicTermId];
+  else if(dateReports.includes(name))params=[schoolId,from,to];
+  else params=[schoolId];
   const result=await c.query(sql,params);
   return result.rows as Record<string,unknown>[];
 }
@@ -1376,7 +1380,8 @@ operationsRouter.get('/reports/:report.csv',requirePermission('reports.export'),
 operationsRouter.get('/reports/:report.xlsx',requirePermission('reports.export'),wrap(async(req,res)=>{
   const name=String(req.params.report);if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
   const dates=reportDateFilters(req,res);if(!dates)return;const auth=authContext(req);
-  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to));
+  const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to,academicTermId));
   const ExcelJS=await import('exceljs');const workbook=new ExcelJS.Workbook();const sheet=workbook.addWorksheet(name.slice(0,31));
   const keys=rows.length?Object.keys(rows[0]):['no_data'];
   sheet.columns=keys.map(key=>({header:labelsForReport(key),key,width:Math.min(32,Math.max(12,labelsForReport(key).length+4))}));
