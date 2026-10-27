@@ -11,9 +11,10 @@ function kes(value: unknown): string {
   return new Intl.NumberFormat('en-KE', { style: 'currency', currency: 'KES', maximumFractionDigits: 0 }).format(Number(value ?? 0));
 }
 
-export function FinanceCharts({ feeCollectionTrend, incomeExpenseTrend }: {
+export function FinanceCharts({ feeCollectionTrend, incomeExpenseTrend, academicTermSelected = false }: {
   feeCollectionTrend: TrendRow[];
   incomeExpenseTrend: TrendRow[];
+  academicTermSelected?: boolean;
 }): ReactElement {
   const collectionMax = Math.max(1, ...feeCollectionTrend.map(row => amount(row.collected)));
   const financeMax = Math.max(1, ...incomeExpenseTrend.flatMap(row => [amount(row.income), amount(row.expenses)]));
@@ -29,7 +30,7 @@ export function FinanceCharts({ feeCollectionTrend, incomeExpenseTrend }: {
     </section>
     <section className="sl-panel">
       <h2>Income vs expenses</h2>
-      {incomeExpenseTrend.length ? incomeExpenseTrend.map(row => <div className="sl-chart-group" key={String(row.month)}>
+      {academicTermSelected ? <p className="sl-muted">This chart is unavailable for a single academic term because expense records are not yet attributed to academic terms. Clear the term filter to compare income and expenses for the selected accounting dates.</p> : incomeExpenseTrend.length ? incomeExpenseTrend.map(row => <div className="sl-chart-group" key={String(row.month)}>
         <strong>{String(row.month)}</strong>
         <div className="sl-chart-row"><span>Income</span><progress value={amount(row.income)} max={financeMax} aria-label={`Income ${String(row.month)}`} /><b>{kes(row.income)}</b></div>
         <div className="sl-chart-row"><span>Expenses</span><progress value={amount(row.expenses)} max={financeMax} aria-label={`Expenses ${String(row.month)}`} /><b>{kes(row.expenses)}</b></div>
