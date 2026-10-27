@@ -535,9 +535,26 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
        count(*) FILTER (WHERE status='approved')::int AS approved_unpaid,
        COALESCE(sum(amount) FILTER (WHERE status='paid' AND ($2::date IS NULL OR paid_at::date >= $2::date) AND ($3::date IS NULL OR paid_at::date <= $3::date)),0)::text AS paid_total
        FROM expenses WHERE school_id=$1`,[auth.schoolId,dates.from,dates.to]);
+    const recentPayments=await c.query(
+      `SELECT r.receipt_number,r.received_on,s.admission_number,s.full_name AS student_name,r.amount::text,r.payment_method,r.external_reference
+       FROM fee_receipts r JOIN students s ON s.id=r.student_id AND s.school_id=r.school_id
+       WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
+       ORDER BY r.received_on DESC,r.receipt_number DESC LIMIT 5`,[auth.schoolId,dates.from,dates.to]);
+    const pendingApprovals=await c.query(
+      `SELECT expense_number,category,description,amount::text,incurred_on,status
+       FROM expenses WHERE school_id=$1 AND status='submitted' ORDER BY incurred_on DESC,expense_number DESC LIMIT 5`,[auth.schoolId]);
+    const topOutstanding=await c.query(
+      `SELECT s.admission_number,s.full_name AS student_name,s.class_name,
+        sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0))::numeric(14,2)::text AS outstanding
+       FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
+       LEFT JOIN (SELECT a.invoice_id,sum(a.amount) AS allocated FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND r.status='posted' GROUP BY a.invoice_id) a ON a.invoice_id=i.id
+       LEFT JOIN (SELECT invoice_id,sum(amount) AS waived FROM fee_waivers WHERE school_id=$1 AND status='posted' GROUP BY invoice_id) w ON w.invoice_id=i.id
+       WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)
+       GROUP BY s.id HAVING sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0))>0
+       ORDER BY sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0)) DESC LIMIT 5`,[auth.schoolId,dates.from,dates.to]);
     const bank=await c.query("SELECT count(*)::int AS unmatched FROM bank_statement_lines WHERE school_id=$1 AND matched_at IS NULL",[auth.schoolId]);
     const journals=await c.query("SELECT count(*)::int AS posted_count FROM journal_entries WHERE school_id=$1 AND status='posted' AND ($2::date IS NULL OR posting_date >= $2::date) AND ($3::date IS NULL OR posting_date <= $3::date)",[auth.schoolId,dates.from,dates.to]);
-    return {fees:fees.rows[0],expenses:expenses.rows[0],unmatchedBankLines:bank.rows[0].unmatched,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to}};
+    return {fees:fees.rows[0],expenses:expenses.rows[0],recentPayments:recentPayments.rows,pendingApprovals:pendingApprovals.rows,topOutstanding:topOutstanding.rows,unmatchedBankLines:bank.rows[0].unmatched,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to}};
   });
   res.json({schoolId:auth.schoolId,summary:data});
 }));
