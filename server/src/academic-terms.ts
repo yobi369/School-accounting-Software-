@@ -56,6 +56,8 @@ academicTermsRouter.post('/academic-years', requirePermission('periods.manage'),
     if (!isValidDateRange(d.startsOn,d.endsOn)) { res.status(422).json({error:'Academic-year start must be on or before its end and both must be real calendar dates.'}); return; }
     const auth = authContext(req);
     const year = await withSchoolTransaction(auth.schoolId, async c => {
+      // Serialize year creation within a school so concurrent requests cannot race the overlap check.
+      await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[auth.schoolId]);
       const overlap = await c.query(
         \`SELECT id FROM academic_years WHERE school_id=$1 AND daterange(starts_on,ends_on,'[]') && daterange($2::date,$3::date,'[]') LIMIT 1\`,
         [auth.schoolId,d.startsOn,d.endsOn],
