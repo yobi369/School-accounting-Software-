@@ -36,12 +36,12 @@ academicTermsRouter.get('/academic-years', requirePermission('ledger.read'), asy
   try {
     const auth = authContext(req);
     const result = await withSchoolTransaction(auth.schoolId, c => c.query(
-      \`SELECT y.id,y.name,y.starts_on,y.ends_on,y.status,y.created_at,y.closed_at,
+      `SELECT y.id,y.name,y.starts_on,y.ends_on,y.status,y.created_at,y.closed_at,
         COALESCE(json_agg(json_build_object('id',t.id,'name',t.name,'starts_on',t.starts_on,'ends_on',t.ends_on,'status',t.status)
           ORDER BY t.starts_on) FILTER (WHERE t.id IS NOT NULL),'[]'::json) AS terms
        FROM academic_years y LEFT JOIN academic_terms t
          ON t.school_id=y.school_id AND t.academic_year_id=y.id
-       WHERE y.school_id=$1 GROUP BY y.id ORDER BY y.starts_on DESC\`,
+       WHERE y.school_id=$1 GROUP BY y.id ORDER BY y.starts_on DESC`,
       [auth.schoolId],
     ));
     res.json({academicYears:result.rows});
@@ -59,7 +59,7 @@ academicTermsRouter.post('/academic-years', requirePermission('periods.manage'),
       // Serialize year creation within a school so concurrent requests cannot race the overlap check.
       await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[auth.schoolId]);
       const overlap = await c.query(
-        \`SELECT id FROM academic_years WHERE school_id=$1 AND daterange(starts_on,ends_on,'[]') && daterange($2::date,$3::date,'[]') LIMIT 1\`,
+        `SELECT id FROM academic_years WHERE school_id=$1 AND daterange(starts_on,ends_on,'[]') && daterange($2::date,$3::date,'[]') LIMIT 1`,
         [auth.schoolId,d.startsOn,d.endsOn],
       );
       if (overlap.rowCount) throw Object.assign(new Error('Academic years cannot overlap.'),{statusCode:409});
@@ -92,7 +92,7 @@ academicTermsRouter.post('/academic-terms', requirePermission('periods.manage'),
       if (y.status !== 'open') throw Object.assign(new Error('Cannot add a term to a closed academic year.'),{statusCode:409});
       if (d.startsOn < ys || d.endsOn > ye) throw Object.assign(new Error('Term dates must be within the academic year.'),{statusCode:422});
       const overlap = await c.query(
-        \`SELECT id FROM academic_terms WHERE school_id=$1 AND academic_year_id=$2 AND daterange(starts_on,ends_on,'[]') && daterange($3::date,$4::date,'[]') LIMIT 1\`,
+        `SELECT id FROM academic_terms WHERE school_id=$1 AND academic_year_id=$2 AND daterange(starts_on,ends_on,'[]') && daterange($3::date,$4::date,'[]') LIMIT 1`,
         [auth.schoolId,d.academicYearId,d.startsOn,d.endsOn],
       );
       if (overlap.rowCount) throw Object.assign(new Error('Terms within an academic year cannot overlap.'),{statusCode:409});
@@ -118,8 +118,8 @@ academicTermsRouter.post('/academic-terms/:id/close', requirePermission('periods
       if (!found.rowCount) throw Object.assign(new Error('Academic term not found.'),{statusCode:404});
       if (found.rows[0].status === 'closed') throw Object.assign(new Error('Academic term is already closed.'),{statusCode:409});
       const updated = await c.query(
-        \`UPDATE academic_terms SET status='closed',closed_at=now(),closed_by=$3
-         WHERE school_id=$1 AND id=$2 RETURNING id,name,status,closed_at\`,
+        `UPDATE academic_terms SET status='closed',closed_at=now(),closed_by=$3
+         WHERE school_id=$1 AND id=$2 RETURNING id,name,status,closed_at`,
         [auth.schoolId,id.data,auth.userId],
       );
       await writeAudit(c,auth.schoolId,auth.userId,'academic_term.close','academic_term',id.data,{reason:body.data.reason});
