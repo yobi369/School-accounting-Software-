@@ -205,6 +205,24 @@ operationsRouter.post('/fees/invoices',requirePermission('fees.manage'),wrap(asy
   } catch(error){if(!handleError(res,error))throw error;}
 }));
 
+operationsRouter.get('/fees/receipts',requirePermission('fees.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    `SELECT r.id,r.receipt_number,r.student_id,s.admission_number,s.full_name AS student_name,
+      r.received_on,r.amount::text,r.payment_method,r.external_reference,r.notes,r.status,
+      r.journal_entry_id,r.received_by,r.created_at,
+      COALESCE(json_agg(json_build_object('invoiceNumber',i.invoice_number,'amount',a.amount::text))
+        FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS allocations
+     FROM fee_receipts r
+     JOIN students s ON s.id=r.student_id AND s.school_id=r.school_id
+     LEFT JOIN fee_receipt_allocations a ON a.school_id=r.school_id AND a.receipt_id=r.id
+     LEFT JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+     WHERE r.school_id=$1
+     GROUP BY r.id,s.admission_number,s.full_name
+     ORDER BY r.received_on DESC,r.created_at DESC LIMIT 500`,[auth.schoolId]));
+  res.json({receipts:result.rows});
+}));
+
 const receiptSchema=z.object({
   studentId:z.string().uuid(),receiptNumber:z.string().trim().min(1).max(60),
   receivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
