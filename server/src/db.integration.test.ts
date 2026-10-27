@@ -304,6 +304,45 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
   });
 
 
+  it('rejects bulk invoicing when the linked academic term has been closed', async () => {
+    const schoolId=randomUUID(),userId=randomUUID(),roleId=randomUUID();
+    const yearId=randomUUID(),termId=randomUUID(),studentId=randomUUID(),structureId=randomUUID();
+    const code='CLOSE'+randomUUID().replaceAll('-','').slice(0,8).toUpperCase();
+    await withSchoolTransaction(schoolId,async c=>{
+      await c.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[schoolId,'Closed Term Billing School',code]);
+      await c.query('INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',[userId,'closed-'+code.toLowerCase()+'@example.test','test-hash','Closed Term Tester']);
+      await c.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[roleId,schoolId,'term_billing_tester']);
+      await c.query("INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,'active')",[schoolId,userId,roleId]);
+      for(const permission of ['fees.manage']){
+        await c.query('INSERT INTO permissions (code,description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING',[permission,permission]);
+        await c.query('INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING',[roleId,permission]);
+      }
+      await c.query('INSERT INTO academic_years (id,school_id,name,starts_on,ends_on,created_by) VALUES ($1,$2,$3,$4,$5,$6)',[yearId,schoolId,'2026–2027','2026-01-01','2027-12-31',userId]);
+      await c.query('INSERT INTO academic_terms (id,school_id,academic_year_id,name,starts_on,ends_on,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7)',[termId,schoolId,yearId,'Term 3','2026-01-01','2027-03-31',userId]);
+      await c.query("INSERT INTO students (id,school_id,admission_number,full_name,class_name,status) VALUES ($1,$2,'CLOSE-001','Closed Term Student','Grade 5','active')",[studentId,schoolId]);
+      await c.query("INSERT INTO fee_structures (id,school_id,class_name,academic_year,term_name,academic_term_id,due_on,status,created_by) VALUES ($1,$2,'Grade 5','2026–2027','Term 3',$3,'2027-03-20','active',$4)",[structureId,schoolId,termId,userId]);
+      await c.query("INSERT INTO fee_structure_items (id,school_id,structure_id,item_name,amount) VALUES ($1,$2,$3,'Tuition',1000)",[randomUUID(),schoolId,structureId]);
+      await c.query("UPDATE academic_terms SET status='closed',closed_at=now(),closed_by=$3 WHERE school_id=$1 AND id=$2",[schoolId,termId,userId]);
+    });
+    const session=await createSession(userId,schoolId);
+    const app=express();app.use(express.json());app.use('/api/v1',operationsRouter);
+    const server=app.listen(0,'127.0.0.1');
+    try{
+      await new Promise<void>((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject);});
+      const address=server.address();
+      if(!address||typeof address==='string')throw new Error('Closed-term test server did not bind to a TCP port.');
+      const response=await fetch('http://127.0.0.1:'+address.port+'/api/v1/fees/structures/'+structureId+'/invoice-class',{
+        method:'POST',headers:{Authorization:'Bearer '+session.token,'Content-Type':'application/json'},body:JSON.stringify({}),
+      });
+      expect(response.status).toBe(409);
+      expect((await response.json() as {error:string}).error).toContain('closed or missing academic term');
+      const invoices=await withSchoolTransaction(schoolId,c=>c.query('SELECT id FROM fee_invoices WHERE school_id=$1 AND fee_structure_id=$2',[schoolId,structureId]));
+      expect(invoices.rowCount).toBe(0);
+    }finally{
+      await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
+    }
+  });
+
   it('filters invoice reports and CSV exports by school-scoped academic term', async () => {
     const schoolId=randomUUID(), userId=randomUUID(), roleId=randomUUID();
     const studentId=randomUUID(), yearId=randomUUID(), termOneId=randomUUID(), termTwoId=randomUUID();
@@ -339,6 +378,15 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       if(!address||typeof address==='string')throw new Error('Academic report test server did not bind to a TCP port.');
       const base='http://127.0.0.1:'+address.port;
       const headers={Authorization:'Bearer '+session.token};
+      const overviewResponse=await fetch(base+'/api/v1/overview?academicTermId='+termOneId,{headers});
+      expect(overviewResponse.status).toBe(200);
+      const overview=await overviewResponse.json() as {summary:{fees:{billed:string;outstanding:string};topOutstanding:Array<{admission_number:string}>;feeCollectionTrend:unknown[];incomeExpenseTrend:unknown[];filters:{academicTermId:string}}};
+      expect(Number(overview.summary.fees.billed)).toBe(1000);
+      expect(Number(overview.summary.fees.outstanding)).toBe(1000);
+      expect(overview.summary.topOutstanding.map(row=>row.admission_number)).toEqual(['TERM-001']);
+      expect(overview.summary.filters.academicTermId).toBe(termOneId);
+      expect(overview.summary.incomeExpenseTrend).toHaveLength(0);
+
       const invoiceResponse=await fetch(base+'/api/v1/reports/invoice-register?academicTermId='+termOneId,{headers});
       expect(invoiceResponse.status).toBe(200);
       const invoiceReport=await invoiceResponse.json() as {rows:Array<{invoice_number:string}>};
