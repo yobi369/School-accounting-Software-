@@ -104,6 +104,53 @@ operationsRouter.get('/students',requirePermission('students.read'),wrap(async(r
      ORDER BY full_name LIMIT 500`,[auth.schoolId,q]));
   res.json({students:result.rows});
 }));
+operationsRouter.get('/students/:studentId/financial-account',requirePermission('students.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);const studentId=String(req.params.studentId);
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(studentId)){res.status(400).json({error:'Invalid student ID.'});return;}
+  const result=await withSchoolTransaction(auth.schoolId,async c=>{
+    const student=await c.query(
+      'SELECT id,admission_number,full_name,class_name,guardian_name,guardian_phone,status FROM students WHERE school_id=$1 AND id=$2',
+      [auth.schoolId,studentId]);
+    if(!student.rowCount)return null;
+    const transactions=await c.query(
+      `WITH events AS (
+        SELECT i.id AS transaction_id,i.issued_on::date AS transaction_date,i.invoice_number AS reference,
+          COALESCE(i.description,'School fees') AS description,'invoice'::text AS transaction_type,
+          i.amount::numeric(14,2) AS debit,0::numeric(14,2) AS credit,1 AS sort_order
+        FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status<>'void'
+        UNION ALL
+        SELECT r.id,r.received_on::date,r.receipt_number,
+          COALESCE(r.notes,'Fee payment · '||r.payment_method),'receipt'::text,
+          0::numeric(14,2),r.amount::numeric(14,2),2
+        FROM fee_receipts r WHERE r.school_id=$1 AND r.student_id=$2 AND r.status='posted'
+        UNION ALL
+        SELECT w.id,w.waived_on::date,w.waiver_number,w.reason,'waiver'::text,
+          0::numeric(14,2),w.amount::numeric(14,2),3
+        FROM fee_waivers w JOIN fee_invoices i ON i.id=w.invoice_id AND i.school_id=w.school_id
+        WHERE w.school_id=$1 AND i.student_id=$2 AND w.status='posted'
+      ), balances AS (
+        SELECT *,SUM(debit-credit) OVER(ORDER BY transaction_date,sort_order,reference,transaction_id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_balance
+        FROM events
+      )
+      SELECT transaction_id,transaction_date,reference,description,transaction_type,
+        debit::text,credit::text,running_balance::numeric(14,2)::text AS running_balance
+      FROM balances ORDER BY transaction_date,sort_order,reference,transaction_id`,
+      [auth.schoolId,studentId]);
+    const totals=await c.query(
+      `SELECT COALESCE(sum(debit),0)::numeric(14,2)::text AS billed,
+        COALESCE(sum(credit),0)::numeric(14,2)::text AS credits,
+        COALESCE(sum(debit-credit),0)::numeric(14,2)::text AS balance
+       FROM (
+         SELECT i.amount::numeric AS debit,0::numeric AS credit FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status<>'void'
+         UNION ALL SELECT 0::numeric,r.amount::numeric FROM fee_receipts r WHERE r.school_id=$1 AND r.student_id=$2 AND r.status='posted'
+         UNION ALL SELECT 0::numeric,w.amount::numeric FROM fee_waivers w JOIN fee_invoices i ON i.id=w.invoice_id AND i.school_id=w.school_id WHERE w.school_id=$1 AND i.student_id=$2 AND w.status='posted'
+       ) t`,[auth.schoolId,studentId]);
+    return {student:student.rows[0],transactions:transactions.rows,totals:totals.rows[0]};
+  });
+  if(!result){res.status(404).json({error:'Student not found in this school.'});return;}
+  res.json(result);
+}));
+
 operationsRouter.post('/students',requirePermission('students.manage'),wrap(async(req,res)=>{
   const parsed=studentSchema.safeParse(req.body); if(!parsed.success){res.status(400).json({error:'Invalid student details.',details:parsed.error.flatten()});return;}
   const auth=authContext(req); const d=parsed.data;
