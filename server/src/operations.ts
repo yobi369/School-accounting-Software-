@@ -410,7 +410,7 @@ operationsRouter.get('/expenses',requirePermission('expenses.read'),wrap(async(r
   const auth=authContext(req);const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
     `SELECT e.id,e.expense_number,e.category,e.description,e.incurred_on,e.amount::text,e.status,
       e.supplier_id,s.name AS supplier_name,e.requested_by,e.approved_by,e.approved_at,e.paid_at,
-      e.journal_entry_id,e.payment_journal_entry_id
+      e.journal_entry_id,e.payment_journal_entry_id,e.academic_term_id
      FROM expenses e LEFT JOIN suppliers s ON s.id=e.supplier_id AND s.school_id=e.school_id
      WHERE e.school_id=$1 ORDER BY e.created_at DESC LIMIT 500`,[auth.schoolId]));
   res.json({expenses:result.rows});
@@ -420,14 +420,19 @@ operationsRouter.post('/expenses',requirePermission('expenses.create'),wrap(asyn
   const d=parsed.data;const auth=authContext(req);const amount=parseKesToMinorUnits(d.amount);if(amount<=0n){res.status(422).json({error:'Expense amount must be positive.'});return;}
   try{
     const expense=await withSchoolTransaction(auth.schoolId,async c=>{
+      const incurredOn=d.incurredOn??new Date().toISOString().slice(0,10);
+      if(d.academicTermId){
+        const term=await c.query("SELECT t.id FROM academic_terms t JOIN academic_years y ON y.school_id=t.school_id AND y.id=t.academic_year_id WHERE t.school_id=$1 AND t.id=$2 AND t.status='open' AND y.status='open' AND t.starts_on <= $3::date AND t.ends_on >= $3::date",[auth.schoolId,d.academicTermId,incurredOn]);
+        if(!term.rowCount)throw Object.assign(new Error('Choose an open academic term in this school that contains the expense date.'),{statusCode:422});
+      }
       const account=await c.query("SELECT id FROM accounts WHERE school_id=$1 AND id=$2 AND account_type='expense' AND is_active=true",[auth.schoolId,d.expenseAccountId]);
       if(!account.rowCount)throw Object.assign(new Error('Choose an active expense ledger account in this school.'),{statusCode:422});
       const id=randomUUID();
       await c.query(
-        "INSERT INTO expenses (id,school_id,expense_number,supplier_id,category,description,incurred_on,amount,status,requested_by,expense_account_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'submitted',$9,$10)",
-        [id,auth.schoolId,d.expenseNumber,d.supplierId??null,d.category,d.description,d.incurredOn??new Date().toISOString().slice(0,10),amountString(amount),auth.userId,d.expenseAccountId,d.academicTermId??null]);
-      await audit(c,auth.schoolId,auth.userId,'expense.submit','expense',id,{expenseNumber:d.expenseNumber,amount:amountString(amount)});
-      return {id,expenseNumber:d.expenseNumber,amount:amountString(amount),status:'submitted'};
+        "INSERT INTO expenses (id,school_id,expense_number,supplier_id,category,description,incurred_on,amount,status,requested_by,expense_account_id,academic_term_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'submitted',$9,$10,$11)",
+        [id,auth.schoolId,d.expenseNumber,d.supplierId??null,d.category,d.description,incurredOn,amountString(amount),auth.userId,d.expenseAccountId,d.academicTermId??null]);
+      await audit(c,auth.schoolId,auth.userId,'expense.submit','expense',id,{expenseNumber:d.expenseNumber,amount:amountString(amount),academicTermId:d.academicTermId??null});
+      return {id,expenseNumber:d.expenseNumber,amount:amountString(amount),status:'submitted',academicTermId:d.academicTermId??null};
     });
     res.status(201).json({expense});
   }catch(error){if(!handleError(res,error))throw error;}
@@ -662,10 +667,10 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
        (SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),2)::text END AS collection_percent`,
       [auth.schoolId,dates.from,dates.to,academicTermId]);
     const expenses=await c.query(
-      `SELECT count(*) FILTER (WHERE status='submitted')::int AS awaiting_approval,
-       count(*) FILTER (WHERE status='approved')::int AS approved_unpaid,
-       COALESCE(sum(amount) FILTER (WHERE status='paid' AND ($2::date IS NULL OR paid_at::date >= $2::date) AND ($3::date IS NULL OR paid_at::date <= $3::date)),0)::text AS paid_total
-       FROM expenses WHERE school_id=$1`,[auth.schoolId,dates.from,dates.to]);
+      `SELECT count(*) FILTER (WHERE status='submitted' AND ($4::uuid IS NULL OR academic_term_id=$4::uuid))::int AS awaiting_approval,
+       count(*) FILTER (WHERE status='approved' AND ($4::uuid IS NULL OR academic_term_id=$4::uuid))::int AS approved_unpaid,
+       COALESCE(sum(amount) FILTER (WHERE status='paid' AND ($2::date IS NULL OR paid_at::date >= $2::date) AND ($3::date IS NULL OR paid_at::date <= $3::date) AND ($4::uuid IS NULL OR academic_term_id=$4::uuid)),0)::text AS paid_total
+       FROM expenses WHERE school_id=$1`,[auth.schoolId,dates.from,dates.to,academicTermId]);
     const recentPayments=await c.query(
       `SELECT r.receipt_number,r.received_on,s.admission_number,s.full_name AS student_name,r.amount::text,r.payment_method,r.external_reference
        FROM fee_receipts r JOIN students s ON s.id=r.student_id AND s.school_id=r.school_id
@@ -674,7 +679,7 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
        ORDER BY r.received_on DESC,r.receipt_number DESC LIMIT 5`,[auth.schoolId,dates.from,dates.to,academicTermId]);
     const pendingApprovals=await c.query(
       `SELECT expense_number,category,description,amount::text,incurred_on,status
-       FROM expenses WHERE school_id=$1 AND status='submitted' ORDER BY incurred_on DESC,expense_number DESC LIMIT 5`,[auth.schoolId]);
+       FROM expenses WHERE school_id=$1 AND status='submitted' AND ($2::uuid IS NULL OR academic_term_id=$2::uuid) ORDER BY incurred_on DESC,expense_number DESC LIMIT 5`,[auth.schoolId,academicTermId]);
     const topOutstanding=await c.query(
       `SELECT s.admission_number,s.full_name AS student_name,s.class_name,
         sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0))::numeric(14,2)::text AS outstanding
