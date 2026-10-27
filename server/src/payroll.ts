@@ -8,7 +8,8 @@ import { parseKesToMinorUnits } from './domain/ledger.js';
 
 export const payrollRouter = Router();
 payrollRouter.use(requireAuth);
-const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v => { const time=Date.parse(v+'T00:00:00Z'); return Number.isFinite(time) && new Date(time).toISOString().slice(0,10)===v; },'Use a real calendar date.');
+export function isRealPayrollDate(value:string):boolean { if(!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false; const time=Date.parse(value+'T00:00:00Z'); return Number.isFinite(time) && new Date(time).toISOString().slice(0,10)===value; }
+const dateSchema = z.string().refine(isRealPayrollDate,'Use a real calendar date.');
 const staffSchema = z.object({employeeNumber:z.string().trim().min(1).max(40),fullName:z.string().trim().min(2).max(160),jobTitle:z.string().trim().min(2).max(120),baseSalary:z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/)});
 const runSchema = z.object({periodStart:dateSchema,periodEnd:dateSchema,salaryExpenseAccountId:z.string().uuid(),salaryPayableAccountId:z.string().uuid(),deductionsPayableAccountId:z.string().uuid()});
 const adjustmentSchema = z.object({allowances:z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),deductions:z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),reason:z.string().trim().min(8).max(500)});
