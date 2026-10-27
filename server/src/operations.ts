@@ -401,7 +401,8 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
 
 const expenseSchema=z.object({
   expenseNumber:z.string().trim().min(1).max(60),supplierId:z.string().uuid().optional(),
-  expenseAccountId:z.string().uuid(),category:z.string().trim().min(2).max(100),
+  expenseAccountId:z.string().uuid(),academicTermId:z.string().uuid().optional(),
+  category:z.string().trim().min(2).max(100),
   description:z.string().trim().min(3).max(500),incurredOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   amount:z.string(),
 });
@@ -424,7 +425,7 @@ operationsRouter.post('/expenses',requirePermission('expenses.create'),wrap(asyn
       const id=randomUUID();
       await c.query(
         "INSERT INTO expenses (id,school_id,expense_number,supplier_id,category,description,incurred_on,amount,status,requested_by,expense_account_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'submitted',$9,$10)",
-        [id,auth.schoolId,d.expenseNumber,d.supplierId??null,d.category,d.description,d.incurredOn??new Date().toISOString().slice(0,10),amountString(amount),auth.userId,d.expenseAccountId]);
+        [id,auth.schoolId,d.expenseNumber,d.supplierId??null,d.category,d.description,d.incurredOn??new Date().toISOString().slice(0,10),amountString(amount),auth.userId,d.expenseAccountId,d.academicTermId??null]);
       await audit(c,auth.schoolId,auth.userId,'expense.submit','expense',id,{expenseNumber:d.expenseNumber,amount:amountString(amount)});
       return {id,expenseNumber:d.expenseNumber,amount:amountString(amount),status:'submitted'};
     });
@@ -623,7 +624,7 @@ operationsRouter.post('/sync/push',requirePermission('expenses.create'),wrap(asy
         if(!account.rowCount)return {status:'conflict',clientMutationId:mutation.clientMutationId,reason:'The selected expense account is no longer available.'};
         const id=randomUUID();
         await c.query(
-          "INSERT INTO expenses (id,school_id,expense_number,supplier_id,category,description,incurred_on,amount,status,requested_by,expense_account_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'draft',$9,$10)",
+          "INSERT INTO expenses (id,school_id,expense_number,supplier_id,category,description,incurred_on,amount,status,requested_by,expense_account_id,academic_term_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'draft',$9,$10,$11)",
           [id,auth.schoolId,d.expenseNumber,d.supplierId??null,d.category,d.description,d.incurredOn??new Date().toISOString().slice(0,10),amountString(amount),auth.userId,d.expenseAccountId]);
         const response={status:'accepted',clientMutationId:mutation.clientMutationId,serverId:id,resourceType:'expense',serverState:'draft'};
         await c.query(
