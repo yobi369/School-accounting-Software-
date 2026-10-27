@@ -353,7 +353,7 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       await c.query('INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',[userId,'report-'+code.toLowerCase()+'@example.test','test-hash','Report Test User']);
       await c.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[roleId,schoolId,'term_reporter']);
       await c.query('INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,$4)',[schoolId,userId,roleId,'active']);
-      for(const permission of ['reports.read','reports.export','fees.read','students.read']){
+      for(const permission of ['reports.read','reports.export','fees.read','students.read','expenses.read']){
         await c.query('INSERT INTO permissions (code,description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING',[permission,permission]);
         await c.query('INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING',[roleId,permission]);
       }
@@ -366,6 +366,9 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       await c.query("INSERT INTO fee_structures (id,school_id,class_name,academic_year,term_name,academic_term_id,due_on,status) VALUES ($1,$2,'Grade 4','2026 Academic Year','Term 1',$3,'2026-03-20','active'),($4,$2,'Grade 4','2026 Academic Year','Term 2',$5,'2026-06-20','active')",[structureOneId,schoolId,termOneId,structureTwoId,termTwoId]);
       await c.query("INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,issued_on,due_on,amount,status,fee_structure_id) VALUES ($1,$2,$3,'TERM-INV-1','2026 Academic Year','Term 1 fees','2026-01-10','2026-03-20',1000,'issued',$4),($5,$2,$3,'TERM-INV-2','2026 Academic Year','Term 2 fees','2026-04-10','2026-06-20',2000,'issued',$6)",[
         randomUUID(),schoolId,studentId,structureOneId,randomUUID(),structureTwoId,
+      ]);
+      await c.query("INSERT INTO expenses (id,school_id,expense_number,category,description,incurred_on,amount,status,requested_by,academic_term_id) VALUES ($1,$2,'TERM-EXP-1','Supplies','Term 1 stationery','2026-02-10',120,'submitted',$3,$4),($5,$2,'TERM-EXP-2','Repairs','Term 2 repair','2026-05-10',240,'submitted',$3,$6)",[
+        randomUUID(),schoolId,userId,termOneId,randomUUID(),termTwoId,
       ]);
     });
 
@@ -380,12 +383,18 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       const headers={Authorization:'Bearer '+session.token};
       const overviewResponse=await fetch(base+'/api/v1/overview?academicTermId='+termOneId,{headers});
       expect(overviewResponse.status).toBe(200);
-      const overview=await overviewResponse.json() as {summary:{fees:{billed:string;outstanding:string};topOutstanding:Array<{admission_number:string}>;feeCollectionTrend:unknown[];incomeExpenseTrend:unknown[];filters:{academicTermId:string}}};
+      const overview=await overviewResponse.json() as {summary:{fees:{billed:string;outstanding:string};expenses:{awaiting_approval:number};topOutstanding:Array<{admission_number:string}>;feeCollectionTrend:unknown[];incomeExpenseTrend:unknown[];filters:{academicTermId:string}}};
       expect(Number(overview.summary.fees.billed)).toBe(1000);
       expect(Number(overview.summary.fees.outstanding)).toBe(1000);
       expect(overview.summary.topOutstanding.map(row=>row.admission_number)).toEqual(['TERM-001']);
       expect(overview.summary.filters.academicTermId).toBe(termOneId);
+      expect(overview.summary.expenses.awaiting_approval).toBe(1);
       expect(overview.summary.incomeExpenseTrend).toHaveLength(0);
+
+      const expenseReportResponse=await fetch(base+'/api/v1/reports/expense-register?academicTermId='+termOneId,{headers});
+      expect(expenseReportResponse.status).toBe(200);
+      const expenseReport=await expenseReportResponse.json() as {rows:Array<{expense_number:string}>};
+      expect(expenseReport.rows.map(row=>row.expense_number)).toEqual(['TERM-EXP-1']);
 
       const invoiceResponse=await fetch(base+'/api/v1/reports/invoice-register?academicTermId='+termOneId,{headers});
       expect(invoiceResponse.status).toBe(200);
