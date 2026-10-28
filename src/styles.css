@@ -88,7 +88,7 @@
 .sl-stat-clickable small{line-height:1.55}
 .sl-cash-stat strong{font-size:21px}
 .sl-dashboard-note,.sl-dashboard-footnote{font-size:10px;color:#7e8d83;line-height:1.65;margin:10px 2px}
-.sl-action-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.sl-action-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
 .sl-action-card{display:flex;flex-direction:column;align-items:flex-start;gap:6px;min-width:0;text-align:left;background:#fff;border:1px solid #e3ebe5;border-radius:11px;padding:13px;cursor:pointer;color:#294a38}
 .sl-action-card:hover{border-color:#a6c8b1}
 .sl-action-warning{background:#fffaf0;border-color:#f0dfb8}
