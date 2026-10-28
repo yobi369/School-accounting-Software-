@@ -722,7 +722,12 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
          GROUP BY m.month_start ORDER BY m.month_start`,[auth.schoolId,dates.from,dates.to,academicTermId]);
       const incomeExpenseTrend=await c.query(
         `WITH monthly_income AS (
-           SELECT date_trunc('month',r.received_on)::date AS month_start,sum(r.amount)::numeric(14,2) AS income
+           SELECT date_trunc('month',r.received_on)::date AS month_start,
+             sum(CASE WHEN $4::uuid IS NULL THEN r.amount ELSE COALESCE((
+               SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+               JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
+               WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid
+             ),0) END)::numeric(14,2) AS income
            FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted'
              AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
              AND ($4::uuid IS NULL OR EXISTS (
@@ -780,10 +785,19 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
           COALESCE(sum(balance) FILTER (WHERE is_mpesa),0)::numeric(14,2)::text AS mpesa_balance,
           COALESCE(sum(balance) FILTER (WHERE is_cash OR is_bank OR is_mpesa),0)::numeric(14,2)::text AS total_available_funds
         FROM classified`,[auth.schoolId,dates.to]);
+     const overdue=await c.query(
+       `SELECT count(DISTINCT i.student_id)::int AS overdue_fee_accounts
+        FROM fee_invoices i
+        WHERE i.school_id=$1 AND i.status<>'void' AND i.due_on<current_date
+          AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)
+          AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
+          AND i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)
+            -COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>0`,
+       [auth.schoolId,dates.from,dates.to,academicTermId]);
      const bank=await c.query("SELECT count(*)::int AS unmatched FROM bank_statement_lines WHERE school_id=$1 AND matched_at IS NULL",[auth.schoolId]);
     const journals=await c.query("SELECT count(*)::int AS posted_count FROM journal_entries WHERE school_id=$1 AND status='posted' AND ($2::date IS NULL OR posting_date >= $2::date) AND ($3::date IS NULL OR posting_date <= $3::date)",[auth.schoolId,dates.from,dates.to]);
     const netCashPosition=(Number(fees.rows[0].collected??0)-Number(expenses.rows[0].paid_total??0)-Number(payroll.rows[0].paid_total??0)).toFixed(2);
-    return {fees:fees.rows[0],expenses:expenses.rows[0],payroll:payroll.rows[0],cashPosition:cashPosition.rows[0],netCashPosition,recentPayments:recentPayments.rows,pendingApprovals:pendingApprovals.rows,topOutstanding:topOutstanding.rows,feeCollectionTrend:feeCollectionTrend.rows,incomeExpenseTrend:incomeExpenseTrend.rows,unmatchedBankLines:bank.rows[0].unmatched,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to,academicTermId}};
+    return {fees:fees.rows[0],expenses:expenses.rows[0],payroll:payroll.rows[0],cashPosition:cashPosition.rows[0],netCashPosition,recentPayments:recentPayments.rows,pendingApprovals:pendingApprovals.rows,topOutstanding:topOutstanding.rows,feeCollectionTrend:feeCollectionTrend.rows,incomeExpenseTrend:incomeExpenseTrend.rows,unmatchedBankLines:bank.rows[0].unmatched,overdueFeeAccounts:overdue.rows[0].overdue_fee_accounts,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to,academicTermId}};
     res.json({schoolId:auth.schoolId,summary:data});
 }));
 
