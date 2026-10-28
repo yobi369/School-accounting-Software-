@@ -13,7 +13,7 @@ function kes(value: unknown): string {
 
 function monthLabel(value: unknown): string {
   const raw = String(value ?? '');
-  const match = /^(\\d{4})-(\\d{2})$/.exec(raw);
+  const match = /^(\d{4})-(\d{2})$/.exec(raw);
   if (!match) return raw;
   return new Intl.DateTimeFormat('en-GB', { month: 'short', timeZone: 'UTC' }).format(new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, 1)));
 }
