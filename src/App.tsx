@@ -258,7 +258,6 @@ function Workspace({session,onLogout,onSwitch}:{session:SchoolSession;onLogout:(
           const periodLabel=period?String(period.starts_on).slice(0,7):selectedYearId?'Full financial year':'All accounting periods';
           const recent=Array.isArray(summary.recentPayments)?summary.recentPayments as Row[]:[];
           const outstanding=Array.isArray(summary.topOutstanding)?summary.topOutstanding as Row[]:[];
-          const pending=Array.isArray(summary.pendingApprovals)?summary.pendingApprovals as Row[]:[];
           const collections=Array.isArray(summary.feeCollectionTrend)?summary.feeCollectionTrend as Row[]:[];
           const finance=Array.isArray(summary.incomeExpenseTrend)?summary.incomeExpenseTrend as Row[]:[];
           const actionItems=[
