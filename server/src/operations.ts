@@ -695,27 +695,32 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
        GROUP BY s.id HAVING sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0))>0
        ORDER BY sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0)) DESC LIMIT 5`,[auth.schoolId,dates.from,dates.to,academicTermId]);
     const feeCollectionTrend=await c.query(
-       `SELECT to_char(date_trunc('month',collected_on),'YYYY-MM') AS month,
-          sum(amount)::numeric(14,2)::text AS collected
-        FROM (
-          SELECT r.received_on AS collected_on,r.amount
-          FROM fee_receipts r
-          WHERE r.school_id=$1 AND r.status='posted' AND $4::uuid IS NULL
-            AND ($2::date IS NULL OR r.received_on >= $2::date)
-            AND ($3::date IS NULL OR r.received_on <= $3::date)
-          UNION ALL
-          SELECT r.received_on AS collected_on,a.amount
-          FROM fee_receipt_allocations a
-          JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
-          JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
-          JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
-          WHERE a.school_id=$1 AND r.status='posted' AND $4::uuid IS NOT NULL AND fs.academic_term_id=$4::uuid
-            AND ($2::date IS NULL OR r.received_on >= $2::date)
-            AND ($3::date IS NULL OR r.received_on <= $3::date)
-        ) collections
-        GROUP BY date_trunc('month',collected_on)
-        ORDER BY date_trunc('month',collected_on)`,[auth.schoolId,dates.from,dates.to,academicTermId]);
-     const incomeExpenseTrend=await c.query(
+        `WITH collections AS (
+           SELECT r.received_on::date AS collected_on,r.amount
+           FROM fee_receipts r
+           WHERE r.school_id=$1 AND r.status='posted' AND $4::uuid IS NULL
+             AND ($2::date IS NULL OR r.received_on >= $2::date)
+             AND ($3::date IS NULL OR r.received_on <= $3::date)
+           UNION ALL
+           SELECT r.received_on::date AS collected_on,a.amount
+           FROM fee_receipt_allocations a
+           JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
+           JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+           JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
+           WHERE a.school_id=$1 AND r.status='posted' AND $4::uuid IS NOT NULL AND fs.academic_term_id=$4::uuid
+             AND ($2::date IS NULL OR r.received_on >= $2::date)
+             AND ($3::date IS NULL OR r.received_on <= $3::date)
+         ), months AS (
+           SELECT generate_series(
+             date_trunc('month',COALESCE($2::date,current_date-interval '11 months')),
+             date_trunc('month',COALESCE($3::date,current_date)),
+             interval '1 month')::date AS month_start
+         )
+         SELECT to_char(m.month_start,'YYYY-MM') AS month,
+           COALESCE(sum(c.amount),0)::numeric(14,2)::text AS collected
+         FROM months m LEFT JOIN collections c ON date_trunc('month',c.collected_on)=m.month_start
+         GROUP BY m.month_start ORDER BY m.month_start`,[auth.schoolId,dates.from,dates.to,academicTermId]);
+      const incomeExpenseTrend=await c.query(
         `WITH monthly_income AS (
            SELECT date_trunc('month',r.received_on)::date AS month_start,sum(r.amount)::numeric(14,2) AS income
            FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted'
@@ -737,7 +742,9 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
              AND ($2::date IS NULL OR r.paid_at::date >= $2::date) AND ($3::date IS NULL OR r.paid_at::date <= $3::date)
            GROUP BY date_trunc('month',r.paid_at)
          ), months AS (
-           SELECT month_start FROM monthly_income UNION SELECT month_start FROM monthly_expenses UNION SELECT month_start FROM monthly_payroll
+           SELECT generate_series(
+             date_trunc('month',COALESCE($2::date,current_date-interval '11 months')),
+             date_trunc('month',COALESCE($3::date,current_date)), interval '1 month')::date AS month_start
          )
          SELECT to_char(m.month_start,'YYYY-MM') AS month,
            COALESCE(i.income,0)::numeric(14,2)::text AS income,
