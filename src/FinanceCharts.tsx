@@ -59,7 +59,7 @@ export function FinanceCharts({ feeCollectionTrend, incomeExpenseTrend, academic
         <div className="sl-svg-chart-wrap"><svg className="sl-svg-chart" viewBox={`0 0 ${chartWidth} ${chartHeight}`} role="img" aria-label="Monthly fee collection trend">
           {gridLines.map((y,index)=><g key={index}><line x1={left} x2={chartWidth-right} y1={y} y2={y} className="sl-chart-gridline"/><text x={left-8} y={y+4} textAnchor="end" className="sl-chart-axis">{Math.round(collectionMax*(4-index)/4).toLocaleString('en-KE')}</text></g>)}
           <polyline points={polyline(collectionPoints)} className="sl-chart-line sl-chart-line-collections"/>
-          {collectionPoints.map((point,index)=><g key={String(point.row.month)}><circle cx={point.x} cy={point.y} r="4" className="sl-chart-point sl-chart-point-collections"><title>{String(point.row.month)}: {kes(point.row.collected)}</title></circle><text x={point.x} y={chartHeight-16} textAnchor="middle" className="sl-chart-axis">{monthLabel(point.row.month)}</text></g>)}
+          {collectionPoints.map(point=><g key={String(point.row.month)}><circle cx={point.x} cy={point.y} r="4" className="sl-chart-point sl-chart-point-collections"><title>{String(point.row.month)}: {kes(point.row.collected)}</title></circle><text x={point.x} y={chartHeight-16} textAnchor="middle" className="sl-chart-axis">{monthLabel(point.row.month)}</text></g>)}
         </svg></div>
         <div className="sl-chart-caption">Total in view: <strong>{kes(feeCollectionTrend.reduce((sum,row)=>sum+amount(row.collected),0))}</strong></div>
       </> : <p className="sl-muted">No posted fee collections for the selected dates.</p>}
