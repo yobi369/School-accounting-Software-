@@ -794,10 +794,22 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
           AND i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)
             -COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>0`,
        [auth.schoolId,dates.from,dates.to,academicTermId]);
+     const unmatchedMpesa=await c.query(
+       `SELECT count(*)::int AS unmatched_mpesa_payments
+        FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND r.payment_method='mpesa'
+          AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
+          AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+            JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid))
+          AND NOT EXISTS (SELECT 1 FROM bank_statement_lines b WHERE b.school_id=r.school_id
+            AND trim(COALESCE(b.reference,''))<>'' AND trim(COALESCE(b.reference,''))=trim(COALESCE(r.external_reference,'')))`,
+       [auth.schoolId,dates.from,dates.to,academicTermId]);
+     const periodsAwaitingClosure=await c.query(
+       "SELECT count(*)::int AS periods_awaiting_closure FROM accounting_periods WHERE school_id=$1 AND status='open' AND ends_on<current_date",
+       [auth.schoolId]);
      const bank=await c.query("SELECT count(*)::int AS unmatched FROM bank_statement_lines WHERE school_id=$1 AND matched_at IS NULL",[auth.schoolId]);
     const journals=await c.query("SELECT count(*)::int AS posted_count FROM journal_entries WHERE school_id=$1 AND status='posted' AND ($2::date IS NULL OR posting_date >= $2::date) AND ($3::date IS NULL OR posting_date <= $3::date)",[auth.schoolId,dates.from,dates.to]);
     const netCashPosition=(Number(fees.rows[0].collected??0)-Number(expenses.rows[0].paid_total??0)-Number(payroll.rows[0].paid_total??0)).toFixed(2);
-    return {fees:fees.rows[0],expenses:expenses.rows[0],payroll:payroll.rows[0],cashPosition:cashPosition.rows[0],netCashPosition,recentPayments:recentPayments.rows,pendingApprovals:pendingApprovals.rows,topOutstanding:topOutstanding.rows,feeCollectionTrend:feeCollectionTrend.rows,incomeExpenseTrend:incomeExpenseTrend.rows,unmatchedBankLines:bank.rows[0].unmatched,overdueFeeAccounts:overdue.rows[0].overdue_fee_accounts,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to,academicTermId}};
+    return {fees:fees.rows[0],expenses:expenses.rows[0],payroll:payroll.rows[0],cashPosition:cashPosition.rows[0],netCashPosition,recentPayments:recentPayments.rows,pendingApprovals:pendingApprovals.rows,topOutstanding:topOutstanding.rows,feeCollectionTrend:feeCollectionTrend.rows,incomeExpenseTrend:incomeExpenseTrend.rows,unmatchedBankLines:bank.rows[0].unmatched,unmatchedMpesaPayments:unmatchedMpesa.rows[0].unmatched_mpesa_payments,periodsAwaitingClosure:periodsAwaitingClosure.rows[0].periods_awaiting_closure,overdueFeeAccounts:overdue.rows[0].overdue_fee_accounts,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to,academicTermId}};
    });
    res.json({schoolId:auth.schoolId,summary:data});
 }));
