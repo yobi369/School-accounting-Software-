@@ -21,10 +21,9 @@ function escapeHtml(value: unknown): string {
 }
 
 function kes(value: unknown): string {
-  return new Intl.NumberFormat('en-KE', {
-    style: 'currency', currency: 'KES', minimumFractionDigits: 2, maximumFractionDigits: 2,
-  }).format(Number(value ?? 0));
+  return 'KSh ' + Number(value ?? 0).toLocaleString('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+
 
 export function ReceiptPrintButton({ receipt }: { receipt: ReceiptRow }): ReactElement {
   const printReceipt = () => {
@@ -78,7 +77,7 @@ export function ReceiptPrintButton({ receipt }: { receipt: ReceiptRow }): ReactE
       </tbody></table>
       <div class="total">Receipt total: ${escapeHtml(kes(receipt.amount))}</div>
       ${receipt.notes ? '<p><strong>Notes:</strong> ' + escapeHtml(receipt.notes) + '</p>' : ''}
-      <footer>Generated from the ShuleLedger receipt register. Keep this receipt for your records.<br>Use the browser print dialog to print or save as PDF.</footer>
+      <footer>Generated from the Precious SchoolBooks receipt register. Keep this receipt for your records.<br>Use the browser print dialog to print or save as PDF.</footer>
       <script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));</script></body></html>`;
     popup.document.open();
     popup.document.write(html);
