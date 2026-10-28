@@ -674,7 +674,7 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
        COALESCE(sum(amount) FILTER (WHERE status='paid' AND ($2::date IS NULL OR paid_at::date >= $2::date) AND ($3::date IS NULL OR paid_at::date <= $3::date) AND ($4::uuid IS NULL OR academic_term_id=$4::uuid)),0)::text AS paid_total
        FROM expenses WHERE school_id=$1`,[auth.schoolId,dates.from,dates.to,academicTermId]);
     const recentPayments=await c.query(
-      `SELECT r.receipt_number,r.received_on,s.admission_number,s.full_name AS student_name,r.amount::text,r.payment_method,r.external_reference
+      `SELECT r.id,r.receipt_number,r.received_on,s.admission_number,s.full_name AS student_name,r.amount::text,r.payment_method,r.external_reference
        FROM fee_receipts r JOIN students s ON s.id=r.student_id AND s.school_id=r.school_id
        WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
          AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid))
@@ -683,8 +683,10 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
       `SELECT expense_number,category,description,amount::text,incurred_on,status
        FROM expenses WHERE school_id=$1 AND status='submitted' AND ($2::uuid IS NULL OR academic_term_id=$2::uuid) ORDER BY incurred_on DESC,expense_number DESC LIMIT 5`,[auth.schoolId,academicTermId]);
     const topOutstanding=await c.query(
-      `SELECT s.admission_number,s.full_name AS student_name,s.class_name,
-        sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0))::numeric(14,2)::text AS outstanding
+      `SELECT s.id AS student_id,s.admission_number,s.full_name AS student_name,s.class_name,
+        sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0))::numeric(14,2)::text AS outstanding,
+        GREATEST(0,COALESCE(max(current_date-i.due_on) FILTER (WHERE i.due_on<current_date AND i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0)>0),0))::int AS overdue_days,
+        (SELECT max(r2.received_on) FROM fee_receipts r2 WHERE r2.school_id=s.school_id AND r2.student_id=s.id AND r2.status='posted') AS last_payment_date
        FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
        LEFT JOIN (SELECT a.invoice_id,sum(a.amount) AS allocated FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND r.status='posted' GROUP BY a.invoice_id) a ON a.invoice_id=i.id
        LEFT JOIN (SELECT invoice_id,sum(amount) AS waived FROM fee_waivers WHERE school_id=$1 AND status='posted' GROUP BY invoice_id) w ON w.invoice_id=i.id
@@ -693,43 +695,123 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
        GROUP BY s.id HAVING sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0))>0
        ORDER BY sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0)) DESC LIMIT 5`,[auth.schoolId,dates.from,dates.to,academicTermId]);
     const feeCollectionTrend=await c.query(
-       `SELECT to_char(date_trunc('month',collected_on),'YYYY-MM') AS month,
-          sum(amount)::numeric(14,2)::text AS collected
-        FROM (
-          SELECT r.received_on AS collected_on,r.amount
-          FROM fee_receipts r
-          WHERE r.school_id=$1 AND r.status='posted' AND $4::uuid IS NULL
-            AND ($2::date IS NULL OR r.received_on >= $2::date)
-            AND ($3::date IS NULL OR r.received_on <= $3::date)
-          UNION ALL
-          SELECT r.received_on AS collected_on,a.amount
-          FROM fee_receipt_allocations a
-          JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
-          JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
-          JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
-          WHERE a.school_id=$1 AND r.status='posted' AND $4::uuid IS NOT NULL AND fs.academic_term_id=$4::uuid
-            AND ($2::date IS NULL OR r.received_on >= $2::date)
-            AND ($3::date IS NULL OR r.received_on <= $3::date)
-        ) collections
-        GROUP BY date_trunc('month',collected_on)
-        ORDER BY date_trunc('month',collected_on)`,[auth.schoolId,dates.from,dates.to,academicTermId]);
-     const incomeExpenseTrend=academicTermId?{rows:[] as Record<string,unknown>[]} : await c.query(
-       `SELECT to_char(date_trunc('month',j.posting_date),'YYYY-MM') AS month,
-          COALESCE(sum(CASE WHEN a.account_type='income' THEN l.credit-l.debit ELSE 0 END),0)::numeric(14,2)::text AS income,
-          COALESCE(sum(CASE WHEN a.account_type='expense' THEN l.debit-l.credit ELSE 0 END),0)::numeric(14,2)::text AS expenses
-        FROM journal_entries j
-        JOIN journal_lines l ON l.school_id=j.school_id AND l.journal_entry_id=j.id
-        JOIN accounts a ON a.school_id=l.school_id AND a.id=l.account_id
-        WHERE j.school_id=$1 AND j.status='posted' AND a.account_type IN ('income','expense')
-          AND ($2::date IS NULL OR j.posting_date >= $2::date)
-          AND ($3::date IS NULL OR j.posting_date <= $3::date)
-        GROUP BY date_trunc('month',j.posting_date)
-        ORDER BY date_trunc('month',j.posting_date)`,[auth.schoolId,dates.from,dates.to]);
+        `WITH collections AS (
+           SELECT r.received_on::date AS collected_on,r.amount
+           FROM fee_receipts r
+           WHERE r.school_id=$1 AND r.status='posted' AND $4::uuid IS NULL
+             AND ($2::date IS NULL OR r.received_on >= $2::date)
+             AND ($3::date IS NULL OR r.received_on <= $3::date)
+           UNION ALL
+           SELECT r.received_on::date AS collected_on,a.amount
+           FROM fee_receipt_allocations a
+           JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
+           JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+           JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
+           WHERE a.school_id=$1 AND r.status='posted' AND $4::uuid IS NOT NULL AND fs.academic_term_id=$4::uuid
+             AND ($2::date IS NULL OR r.received_on >= $2::date)
+             AND ($3::date IS NULL OR r.received_on <= $3::date)
+         ), months AS (
+           SELECT generate_series(
+             date_trunc('month',COALESCE($2::date,current_date-interval '11 months')),
+             date_trunc('month',COALESCE($3::date,current_date)),
+             interval '1 month')::date AS month_start
+         )
+         SELECT to_char(m.month_start,'YYYY-MM') AS month,
+           COALESCE(sum(c.amount),0)::numeric(14,2)::text AS collected
+         FROM months m LEFT JOIN collections c ON date_trunc('month',c.collected_on)=m.month_start
+         GROUP BY m.month_start ORDER BY m.month_start`,[auth.schoolId,dates.from,dates.to,academicTermId]);
+      const incomeExpenseTrend=await c.query(
+        `WITH monthly_income AS (
+           SELECT date_trunc('month',r.received_on)::date AS month_start,
+             sum(CASE WHEN $4::uuid IS NULL THEN r.amount ELSE COALESCE((
+               SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+               JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
+               WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid
+             ),0) END)::numeric(14,2) AS income
+           FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted'
+             AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
+             AND ($4::uuid IS NULL OR EXISTS (
+               SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+               JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
+               WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid))
+           GROUP BY date_trunc('month',r.received_on)
+         ), monthly_expenses AS (
+           SELECT date_trunc('month',e.paid_at)::date AS month_start,sum(e.amount)::numeric(14,2) AS expenses
+           FROM expenses e WHERE e.school_id=$1 AND e.status='paid'
+             AND ($2::date IS NULL OR e.paid_at::date >= $2::date) AND ($3::date IS NULL OR e.paid_at::date <= $3::date)
+             AND ($4::uuid IS NULL OR e.academic_term_id=$4::uuid)
+           GROUP BY date_trunc('month',e.paid_at)
+         ), monthly_payroll AS (
+           SELECT date_trunc('month',r.paid_at)::date AS month_start,sum(r.net_total)::numeric(14,2) AS payroll
+           FROM payroll_runs r WHERE r.school_id=$1 AND r.status='paid'
+             AND ($2::date IS NULL OR r.paid_at::date >= $2::date) AND ($3::date IS NULL OR r.paid_at::date <= $3::date)
+           GROUP BY date_trunc('month',r.paid_at)
+         ), months AS (
+           SELECT generate_series(
+             date_trunc('month',COALESCE($2::date,current_date-interval '11 months')),
+             date_trunc('month',COALESCE($3::date,current_date)), interval '1 month')::date AS month_start
+         )
+         SELECT to_char(m.month_start,'YYYY-MM') AS month,
+           COALESCE(i.income,0)::numeric(14,2)::text AS income,
+           COALESCE(e.expenses,0)::numeric(14,2)::text AS expenses,
+           COALESCE(p.payroll,0)::numeric(14,2)::text AS payroll,
+           (COALESCE(e.expenses,0)+COALESCE(p.payroll,0))::numeric(14,2)::text AS total_outflow
+         FROM months m LEFT JOIN monthly_income i USING(month_start)
+         LEFT JOIN monthly_expenses e USING(month_start) LEFT JOIN monthly_payroll p USING(month_start)
+         ORDER BY m.month_start`,[auth.schoolId,dates.from,dates.to,academicTermId]);
+     const payroll=await c.query(
+       `SELECT COALESCE(sum(net_total) FILTER (WHERE status='paid' AND ($2::date IS NULL OR paid_at::date >= $2::date) AND ($3::date IS NULL OR paid_at::date <= $3::date)),0)::numeric(14,2)::text AS paid_total,
+         COALESCE(sum(net_total) FILTER (WHERE status<>'paid'),0)::numeric(14,2)::text AS pending_total,
+         count(*) FILTER (WHERE status<>'paid')::int AS pending_runs
+        FROM payroll_runs WHERE school_id=$1`,[auth.schoolId,dates.from,dates.to]);
+     const cashPosition=await c.query(
+       `WITH balances AS (
+          SELECT a.id,a.code,a.name,COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.debit-l.credit ELSE 0 END),0) AS balance
+          FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
+          LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
+            AND ($2::date IS NULL OR j.posting_date <= $2::date)
+          WHERE a.school_id=$1 AND a.account_type='asset'
+          GROUP BY a.id,a.code,a.name
+        ), classified AS (
+          SELECT b.*,
+            (b.code='1000' OR lower(b.name) LIKE '%cash%') AS is_cash,
+            EXISTS(SELECT 1 FROM bank_accounts ba WHERE ba.school_id=$1 AND ba.ledger_account_id=b.id AND ba.is_active=true)
+              AND b.code<>'1000' AND lower(b.name) NOT LIKE '%mpesa%' AND lower(b.name) NOT LIKE '%m-pesa%' AS is_bank,
+            (lower(b.name) LIKE '%mpesa%' OR lower(b.name) LIKE '%m-pesa%' OR lower(b.name) LIKE '%mobile money%' OR lower(b.code) LIKE '%mpesa%') AS is_mpesa
+          FROM balances b
+        )
+        SELECT COALESCE(sum(balance) FILTER (WHERE is_cash AND NOT is_mpesa),0)::numeric(14,2)::text AS cash_balance,
+          COALESCE(sum(balance) FILTER (WHERE is_bank AND NOT is_cash),0)::numeric(14,2)::text AS bank_balance,
+          COALESCE(sum(balance) FILTER (WHERE is_mpesa),0)::numeric(14,2)::text AS mpesa_balance,
+          COALESCE(sum(balance) FILTER (WHERE is_cash OR is_bank OR is_mpesa),0)::numeric(14,2)::text AS total_available_funds
+        FROM classified`,[auth.schoolId,dates.to]);
+     const overdue=await c.query(
+       `SELECT count(DISTINCT i.student_id)::int AS overdue_fee_accounts
+        FROM fee_invoices i
+        WHERE i.school_id=$1 AND i.status<>'void' AND i.due_on<current_date
+          AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)
+          AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
+          AND i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)
+            -COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>0`,
+       [auth.schoolId,dates.from,dates.to,academicTermId]);
+     const unmatchedMpesa=await c.query(
+       `SELECT count(*)::int AS unmatched_mpesa_payments
+        FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND r.payment_method='mpesa'
+          AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
+          AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+            JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid))
+          AND NOT EXISTS (SELECT 1 FROM bank_statement_lines b WHERE b.school_id=r.school_id
+            AND trim(COALESCE(b.reference,''))<>'' AND trim(COALESCE(b.reference,''))=trim(COALESCE(r.external_reference,'')))`,
+       [auth.schoolId,dates.from,dates.to,academicTermId]);
+     const periodsAwaitingClosure=await c.query(
+       "SELECT count(*)::int AS periods_awaiting_closure FROM accounting_periods WHERE school_id=$1 AND status='open' AND ends_on<current_date",
+       [auth.schoolId]);
      const bank=await c.query("SELECT count(*)::int AS unmatched FROM bank_statement_lines WHERE school_id=$1 AND matched_at IS NULL",[auth.schoolId]);
     const journals=await c.query("SELECT count(*)::int AS posted_count FROM journal_entries WHERE school_id=$1 AND status='posted' AND ($2::date IS NULL OR posting_date >= $2::date) AND ($3::date IS NULL OR posting_date <= $3::date)",[auth.schoolId,dates.from,dates.to]);
-    return {fees:fees.rows[0],expenses:expenses.rows[0],recentPayments:recentPayments.rows,pendingApprovals:pendingApprovals.rows,topOutstanding:topOutstanding.rows,feeCollectionTrend:feeCollectionTrend.rows,incomeExpenseTrend:incomeExpenseTrend.rows,unmatchedBankLines:bank.rows[0].unmatched,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to,academicTermId}};
-  });
-  res.json({schoolId:auth.schoolId,summary:data});
+    const netCashPosition=(Number(fees.rows[0].collected??0)-Number(expenses.rows[0].paid_total??0)-Number(payroll.rows[0].paid_total??0)).toFixed(2);
+    return {fees:fees.rows[0],expenses:expenses.rows[0],payroll:payroll.rows[0],cashPosition:cashPosition.rows[0],netCashPosition,recentPayments:recentPayments.rows,pendingApprovals:pendingApprovals.rows,topOutstanding:topOutstanding.rows,feeCollectionTrend:feeCollectionTrend.rows,incomeExpenseTrend:incomeExpenseTrend.rows,unmatchedBankLines:bank.rows[0].unmatched,unmatchedMpesaPayments:unmatchedMpesa.rows[0].unmatched_mpesa_payments,periodsAwaitingClosure:periodsAwaitingClosure.rows[0].periods_awaiting_closure,overdueFeeAccounts:overdue.rows[0].overdue_fee_accounts,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to,academicTermId}};
+   });
+   res.json({schoolId:auth.schoolId,summary:data});
 }));
 
 const openingBalanceSchema=z.object({financialYearId:z.string().uuid(),postingDate:z.string().regex(/^\d{4}-\d{2}-\d{2}$/),description:z.string().trim().min(3).max(500),lines:z.array(z.object({accountId:z.string().uuid(),debit:z.string(),credit:z.string(),memo:z.string().max(500).optional()})).min(2).max(500)});
@@ -1424,7 +1506,7 @@ operationsRouter.get('/reports/:report.pdf',requirePermission('reports.export'),
   const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to,academicTermId));
   const PdfDocument=(await import('pdfkit')).default;const doc=new PdfDocument({size:'A4',layout:'landscape',margin:32,bufferPages:true});
   res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename="${name}-${todayIso()}.pdf"`);
-  doc.pipe(res);doc.fontSize(18).fillColor('#174c3d').text('ShuleLedger — '+name.replaceAll('-',' '));doc.moveDown(.4);
+  doc.pipe(res);doc.fontSize(18).fillColor('#174c3d').text('Precious SchoolBooks — '+name.replaceAll('-',' '));doc.moveDown(.4);
   doc.fontSize(8).fillColor('#64766a').text('KES · Generated '+new Date().toISOString()+' · School '+auth.schoolName);doc.moveDown();
   const keys=rows.length?Object.keys(rows[0]):['no_data'];const widths=keys.map(()=>Math.max(50,(doc.page.width-64)/keys.length));
   const renderRow=(values:unknown[],header=false)=>{const y=doc.y;let x=32;values.forEach((v,i)=>{const w=widths[i];if(header)doc.rect(x,y,w,20).fill('#e7f0ea');doc.fillColor(header?'#174c3d':'#344d40').fontSize(header?7:6).text(String(v??'').slice(0,120),x+3,y+4,{width:w-6,height:18,ellipsis:true});x+=w;});doc.y=y+20;};

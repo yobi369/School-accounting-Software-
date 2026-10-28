@@ -1,6 +1,6 @@
-# ShuleLedger — Kenyan School Accounting Platform
+# Precious SchoolBooks — Kenyan School Accounting Platform
 
-ShuleLedger is a school-finance workspace for Kenyan primary and secondary schools. It is built around double-entry accounting, fee collection, controlled expenses, cash/bank reconciliation, financial reporting, and school-level access controls.
+Precious SchoolBooks is a school-finance workspace for Kenyan primary and secondary schools. It is built around double-entry accounting, fee collection, controlled expenses, cash/bank reconciliation, financial reporting, and school-level access controls.
 
 ## Implemented foundations
 
@@ -13,13 +13,13 @@ ShuleLedger is a school-finance workspace for Kenyan primary and secondary schoo
 - Local Docker Compose pilot for a laptop/desktop, using a local PostgreSQL volume and a separate non-superuser runtime role.
 - GitHub Actions run PostgreSQL migrations, tenant/ledger integration tests, a disposable database dump/restore smoke test, TypeScript checks, and production builds.
 
-## Try ShuleLedger on your own computer
+## Try Precious SchoolBooks on your own computer
 
 Follow the [Local Installation Guide](docs/LOCAL_INSTALLATION.md) to run a local instance on Windows, macOS, or Linux with Docker Compose. It is intended for synthetic-data testing. The local database is separate from the online Render pilot, and the current offline queue supports expense drafts only—not all accounting operations.
 
 ## Licensing
 
-**Proprietary — all rights reserved.** Public source visibility does not grant permission to copy, modify, redistribute, host, or sell ShuleLedger. Commercial use requires prior written authorization. See [LICENSE](LICENSE) and [licensing policy](docs/LICENSING.md). Third-party dependencies retain their own licenses.
+**Proprietary — all rights reserved.** Public source visibility does not grant permission to copy, modify, redistribute, host, or sell Precious SchoolBooks. Commercial use requires prior written authorization. See [LICENSE](LICENSE) and [licensing policy](docs/LICENSING.md). Third-party dependencies retain their own licenses.
 
 ## Technology
 

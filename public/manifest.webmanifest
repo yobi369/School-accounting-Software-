@@ -1,7 +1,7 @@
 {
-  "name": "ShuleLedger School Accounting",
-  "short_name": "ShuleLedger",
-  "description": "Kenyan school finance and accounting workspace",
+  "name": "Precious SchoolBooks — School Accounting",
+  "short_name": "Precious SchoolBooks",
+  "description": "School finance and accounting workspace for Kenya",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f5f7f6",
