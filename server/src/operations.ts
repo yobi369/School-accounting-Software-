@@ -1493,7 +1493,7 @@ operationsRouter.get('/reports/:report.pdf',requirePermission('reports.export'),
   const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to,academicTermId));
   const PdfDocument=(await import('pdfkit')).default;const doc=new PdfDocument({size:'A4',layout:'landscape',margin:32,bufferPages:true});
   res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename="${name}-${todayIso()}.pdf"`);
-  doc.pipe(res);doc.fontSize(18).fillColor('#174c3d').text('ShuleLedger — '+name.replaceAll('-',' '));doc.moveDown(.4);
+  doc.pipe(res);doc.fontSize(18).fillColor('#174c3d').text('Precious SchoolBooks — '+name.replaceAll('-',' '));doc.moveDown(.4);
   doc.fontSize(8).fillColor('#64766a').text('KES · Generated '+new Date().toISOString()+' · School '+auth.schoolName);doc.moveDown();
   const keys=rows.length?Object.keys(rows[0]):['no_data'];const widths=keys.map(()=>Math.max(50,(doc.page.width-64)/keys.length));
   const renderRow=(values:unknown[],header=false)=>{const y=doc.y;let x=32;values.forEach((v,i)=>{const w=widths[i];if(header)doc.rect(x,y,w,20).fill('#e7f0ea');doc.fillColor(header?'#174c3d':'#344d40').fontSize(header?7:6).text(String(v??'').slice(0,120),x+3,y+4,{width:w-6,height:18,ellipsis:true});x+=w;});doc.y=y+20;};
