@@ -798,7 +798,8 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
     const journals=await c.query("SELECT count(*)::int AS posted_count FROM journal_entries WHERE school_id=$1 AND status='posted' AND ($2::date IS NULL OR posting_date >= $2::date) AND ($3::date IS NULL OR posting_date <= $3::date)",[auth.schoolId,dates.from,dates.to]);
     const netCashPosition=(Number(fees.rows[0].collected??0)-Number(expenses.rows[0].paid_total??0)-Number(payroll.rows[0].paid_total??0)).toFixed(2);
     return {fees:fees.rows[0],expenses:expenses.rows[0],payroll:payroll.rows[0],cashPosition:cashPosition.rows[0],netCashPosition,recentPayments:recentPayments.rows,pendingApprovals:pendingApprovals.rows,topOutstanding:topOutstanding.rows,feeCollectionTrend:feeCollectionTrend.rows,incomeExpenseTrend:incomeExpenseTrend.rows,unmatchedBankLines:bank.rows[0].unmatched,overdueFeeAccounts:overdue.rows[0].overdue_fee_accounts,postedJournals:journals.rows[0].posted_count,filters:{from:dates.from,to:dates.to,academicTermId}};
-    res.json({schoolId:auth.schoolId,summary:data});
+   });
+   res.json({schoolId:auth.schoolId,summary:data});
 }));
 
 const openingBalanceSchema=z.object({financialYearId:z.string().uuid(),postingDate:z.string().regex(/^\d{4}-\d{2}-\d{2}$/),description:z.string().trim().min(3).max(500),lines:z.array(z.object({accountId:z.string().uuid(),debit:z.string(),credit:z.string(),memo:z.string().max(500).optional()})).min(2).max(500)});
