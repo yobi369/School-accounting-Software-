@@ -452,7 +452,8 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
       expect(overview.summary.topOutstanding.map(row=>row.admission_number)).toEqual(['TERM-001']);
       expect(overview.summary.filters.academicTermId).toBe(termOneId);
       expect(overview.summary.expenses.awaiting_approval).toBe(1);
-      expect(overview.summary.incomeExpenseTrend).toHaveLength(0);
+      expect(overview.summary.incomeExpenseTrend).toHaveLength(12);
+      expect(overview.summary.incomeExpenseTrend.every(row=>Number((row as {income?:string}).income??0)===0)).toBe(true);
 
       const expenseReportResponse=await fetch(base+'/api/v1/reports/expense-register?academicTermId='+termOneId,{headers});
       expect(expenseReportResponse.status).toBe(200);
