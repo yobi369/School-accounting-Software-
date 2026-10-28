@@ -229,7 +229,7 @@ function Workspace({session,onLogout,onSwitch}:{session:SchoolSession;onLogout:(
   const send=async(path:string,method:string,body:unknown)=>{await apiRequest(path,session,{method,body:JSON.stringify(body)});setNotice('Saved successfully.');await load(active);};
   const money=(value:unknown)=>new Intl.NumberFormat('en-KE',{style:'currency',currency:'KES',maximumFractionDigits:2}).format(Number(value??0));
   const dashboardMoney=(value:unknown)=>'KSh '+Number(value??0).toLocaleString('en-KE',{minimumFractionDigits:2,maximumFractionDigits:2});
-  const dashboardDate=(value:unknown,withTime=true)=>{if(!value)return '—';const raw=String(value);const dateOnly=/^\\d{4}-\\d{2}-\\d{2}$/.test(raw)||/T00:00:00(?:\\.000)?Z$/.test(raw);const date=new Date(dateOnly?raw.slice(0,10)+'T12:00:00+03:00':raw);if(Number.isNaN(date.getTime()))return raw;return new Intl.DateTimeFormat('en-GB',{timeZone:'Africa/Nairobi',day:'2-digit',month:'short',year:'numeric',...(withTime&&!dateOnly?{hour:'2-digit',minute:'2-digit',hour12:true}:{})}).format(date);};
+  const dashboardDate=(value:unknown,withTime=true)=>{if(!value)return '—';const raw=String(value);const dateOnly=/^\d{4}-\d{2}-\d{2}$/.test(raw)||/T00:00:00(?:\.000)?Z$/.test(raw);const date=new Date(dateOnly?raw.slice(0,10)+'T12:00:00+03:00':raw);if(Number.isNaN(date.getTime()))return raw;return new Intl.DateTimeFormat('en-GB',{timeZone:'Africa/Nairobi',day:'2-digit',month:'short',year:'numeric',...(withTime&&!dateOnly?{hour:'2-digit',minute:'2-digit',hour12:true}:{})}).format(date);};
   const title=navigation.find(n=>n.id===active)?.label??'Overview';
 
   return <div className="sl-shell">
