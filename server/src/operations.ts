@@ -1726,7 +1726,6 @@ operationsRouter.get('/reports/:report',requirePermission('reports.read'),wrap(a
   const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to,academicTermId));
   res.json({report:name,currency:'KES',from:dates.from,to:dates.to,rows});
 }));
- THEN substring(${column} from $3)::bigint END),0)+1 AS next FROM ${table} WHERE school_id=$1 AND ${column} LIKE $2`,[schoolId,base+'%',base.length+1]);return base+String(result.rows[0].next).padStart(6,'0');}
 
 
 operationsRouter.get('/budgets',requirePermission('reports.read'),wrap(async(req,res)=>{
