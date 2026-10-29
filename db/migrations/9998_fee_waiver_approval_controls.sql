@@ -3,7 +3,11 @@ ALTER TABLE fee_waivers ADD COLUMN IF NOT EXISTS rejection_reason text;
 ALTER TABLE fee_waivers ADD COLUMN IF NOT EXISTS rejected_by uuid;
 ALTER TABLE fee_waivers ADD COLUMN IF NOT EXISTS rejected_at timestamptz;
 
-DO $$
+ALTER TABLE fee_waivers ALTER COLUMN status DROP DEFAULT;
+ALTER TABLE fee_waivers ALTER COLUMN status TYPE text USING status::text;
+ALTER TABLE fee_waivers ALTER COLUMN status SET DEFAULT 'submitted';
+
+DO $
 DECLARE item record;
 BEGIN
   FOR item IN
