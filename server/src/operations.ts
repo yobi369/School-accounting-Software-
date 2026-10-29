@@ -402,10 +402,11 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
         const inv=await c.query(
           `SELECT i.amount::text,i.student_id,i.status,
              COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
-             COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived
+             COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
+             COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0)::text AS credited
            FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2 FOR UPDATE`,[auth.schoolId,allocation.invoiceId]);
         if(!inv.rowCount||inv.rows[0].student_id!==d.studentId||inv.rows[0].status==='void')throw Object.assign(new Error('An allocated invoice is missing, void, or belongs to another student.'),{statusCode:422});
-        const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(inv.rows[0].allocated))-parseKesToMinorUnits(String(inv.rows[0].waived));
+        const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(inv.rows[0].allocated))-parseKesToMinorUnits(String(inv.rows[0].waived))-parseKesToMinorUnits(String(inv.rows[0].credited));
         if(allocated>outstanding)throw Object.assign(new Error('Allocation exceeds the invoice outstanding balance.'),{statusCode:422});
         await c.query('INSERT INTO fee_receipt_allocations (school_id,receipt_id,invoice_id,amount) VALUES ($1,$2,$3,$4)',[auth.schoolId,receiptId,allocation.invoiceId,amountString(allocated)]);
       }
@@ -1191,8 +1192,8 @@ operationsRouter.post('/fees/waivers',requirePermission('fees.manage'),wrap(asyn
       if(!inv.rowCount||inv.rows[0].status==='void')throw Object.assign(new Error('Invoice was not found or has been voided.'),{statusCode:422});
       const settled=await c.query(
         `SELECT COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=$2 AND r.status='posted'),0)::text AS allocated,
-         COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived`,[auth.schoolId,d.invoiceId]);
-      const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(settled.rows[0].allocated))-parseKesToMinorUnits(String(settled.rows[0].waived));
+         COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived,COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=$1 AND ca.invoice_id=$2 AND ca.status='posted'),0)::text AS credited`,[auth.schoolId,d.invoiceId]);
+      const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(settled.rows[0].allocated))-parseKesToMinorUnits(String(settled.rows[0].waived))-parseKesToMinorUnits(String(settled.rows[0].credited));
       if(amount>outstanding)throw Object.assign(new Error('Waiver exceeds the invoice outstanding balance.'),{statusCode:422});
       const id=randomUUID();
       await c.query("INSERT INTO fee_waivers (id,school_id,waiver_number,adjustment_type,invoice_id,amount,reason,waived_on,created_by,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'submitted')",[id,auth.schoolId,d.waiverNumber,d.adjustmentType,d.invoiceId,amountString(amount),d.reason,waivedOn,auth.userId]);
@@ -1220,9 +1221,9 @@ operationsRouter.post('/fees/waivers/:id/approve',requirePermission('fees.manage
       if(!inv.rowCount||inv.rows[0].status==='void')throw Object.assign(new Error('The invoice is no longer available.'),{statusCode:409});
       const settled=await c.query(
         `SELECT COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=$2 AND r.status='posted'),0)::text AS allocated,
-         COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived`,[auth.schoolId,w.invoice_id]);
-      const amount=parseKesToMinorUnits(String(w.amount));const allocated=parseKesToMinorUnits(String(settled.rows[0].allocated));const waived=parseKesToMinorUnits(String(settled.rows[0].waived));
-      if(amount>parseKesToMinorUnits(String(inv.rows[0].amount))-allocated-waived)throw Object.assign(new Error('Invoice balance changed; the waiver no longer fits the outstanding amount.'),{statusCode:409});
+         COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived,COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=$1 AND ca.invoice_id=$2 AND ca.status='posted'),0)::text AS credited`,[auth.schoolId,w.invoice_id]);
+      const amount=parseKesToMinorUnits(String(w.amount));const allocated=parseKesToMinorUnits(String(settled.rows[0].allocated));const waived=parseKesToMinorUnits(String(settled.rows[0].waived));const credited=parseKesToMinorUnits(String(settled.rows[0].credited));
+      if(amount>parseKesToMinorUnits(String(inv.rows[0].amount))-allocated-waived-credited)throw Object.assign(new Error('Invoice balance changed; the waiver no longer fits the outstanding amount.'),{statusCode:409});
       const journal=await postJournal(c,auth.schoolId,auth.userId,sqlDate(w.waived_on),'Fee waiver '+String(w.waiver_number),'fee_waiver',id.data,[
         {accountCode:'4200',debit:amountString(amount),credit:'0.00'},
         {accountCode:'1200',debit:'0.00',credit:amountString(amount)},
@@ -1252,8 +1253,9 @@ operationsRouter.post('/ledger/journals/:id/reverse',requirePermission('ledger.p
       if(source==='fee_invoice'&&sourceId){
         const settled=await c.query(
           `SELECT (SELECT count(*) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=$2 AND r.status='posted') AS receipts,
-           (SELECT count(*) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted') AS waivers`,[auth.schoolId,sourceId]);
-        if(Number(settled.rows[0].receipts)>0||Number(settled.rows[0].waivers)>0)throw Object.assign(new Error('Reverse posted receipts and waivers before voiding this invoice.'),{statusCode:409});
+           (SELECT count(*) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted') AS waivers,
+           (SELECT count(*) FROM student_fee_credit_allocations WHERE school_id=$1 AND invoice_id=$2 AND status='posted') AS credits`,[auth.schoolId,sourceId]);
+        if(Number(settled.rows[0].receipts)>0||Number(settled.rows[0].waivers)>0||Number(settled.rows[0].credits)>0)throw Object.assign(new Error('Reverse posted receipts and waivers before voiding this invoice.'),{statusCode:409});
       }
       if(source==='expense_approval'&&sourceId){
         const exp=await c.query('SELECT status FROM expenses WHERE school_id=$1 AND id=$2',[auth.schoolId,sourceId]);
@@ -1264,7 +1266,7 @@ operationsRouter.post('/ledger/journals/:id/reverse',requirePermission('ledger.p
       const journal=await postJournal(c,auth.schoolId,auth.userId,reversalDate,`Reversal of ${original.rows[0].entry_number}: ${p.data.reason}`,'reversal',id.data,lines,id.data);
       if(source==='fee_invoice'&&sourceId)await c.query("UPDATE fee_invoices SET status='void' WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
       if(source==='fee_receipt'&&sourceId){
-        const usedCredit=await c.query('SELECT COALESCE(sum(a.amount),0)::text AS used FROM student_fee_credit_allocations a JOIN student_fee_credits cr ON cr.id=a.credit_id AND cr.school_id=a.school_id WHERE a.school_id=$1 AND cr.receipt_id=$2',[auth.schoolId,sourceId]);if(parseKesToMinorUnits(String(usedCredit.rows[0].used))>0n)throw Object.assign(new Error('This receipt has student credit that has already been allocated. Reverse those credit allocations before reversing the receipt.'),{statusCode:409});
+        const usedCredit=await c.query('SELECT COALESCE(sum(a.amount),0)::text AS used FROM student_fee_credit_allocations a JOIN student_fee_credits cr ON cr.id=a.credit_id AND cr.school_id=a.school_id WHERE a.school_id=$1 AND cr.receipt_id=$2 AND a.status='posted'',[auth.schoolId,sourceId]);if(parseKesToMinorUnits(String(usedCredit.rows[0].used))>0n)throw Object.assign(new Error('This receipt has student credit that has already been allocated. Reverse those credit allocations before reversing the receipt.'),{statusCode:409});
         await c.query("UPDATE fee_receipts SET status='reversed' WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
         await c.query("UPDATE student_fee_credits SET status='reversed',remaining_amount=0 WHERE school_id=$1 AND receipt_id=$2",[auth.schoolId,sourceId]);
         const invoices=await c.query('SELECT DISTINCT invoice_id FROM fee_receipt_allocations WHERE school_id=$1 AND receipt_id=$2',[auth.schoolId,sourceId]);
@@ -1272,10 +1274,11 @@ operationsRouter.post('/ledger/journals/:id/reverse',requirePermission('ledger.p
           const settlement=await c.query(
             `SELECT i.amount::text,
              COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
-             COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=i.id AND status='posted'),0)::text AS waived
+             COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=i.id AND status='posted'),0)::text AS waived,
+             COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=$1 AND ca.invoice_id=i.id AND ca.status='posted'),0)::text AS credited
              FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2`,[auth.schoolId,row.invoice_id]);
           if(settlement.rowCount){
-            const total=parseKesToMinorUnits(String(settlement.rows[0].allocated))+parseKesToMinorUnits(String(settlement.rows[0].waived));
+            const total=parseKesToMinorUnits(String(settlement.rows[0].allocated))+parseKesToMinorUnits(String(settlement.rows[0].waived))+parseKesToMinorUnits(String(settlement.rows[0].credited));
             const amount=parseKesToMinorUnits(String(settlement.rows[0].amount));
             await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,row.invoice_id,amountString(total),String(settlement.rows[0].allocated)]);
           }
@@ -1288,9 +1291,10 @@ operationsRouter.post('/ledger/journals/:id/reverse',requirePermission('ledger.p
           const t=await c.query(
             `SELECT i.amount::text,
              COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
-             COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=i.id AND status='posted'),0)::text AS waived
+             COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=i.id AND status='posted'),0)::text AS waived,
+             COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=$1 AND ca.invoice_id=i.id AND ca.status='posted'),0)::text AS credited
              FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2`,[auth.schoolId,w.rows[0].invoice_id]);
-          if(t.rowCount){const total=parseKesToMinorUnits(String(t.rows[0].allocated))+parseKesToMinorUnits(String(t.rows[0].waived));await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,w.rows[0].invoice_id,amountString(total),String(t.rows[0].allocated)]);}
+          if(t.rowCount){const total=parseKesToMinorUnits(String(t.rows[0].allocated))+parseKesToMinorUnits(String(t.rows[0].waived))+parseKesToMinorUnits(String(t.rows[0].credited));await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,w.rows[0].invoice_id,amountString(total),String(t.rows[0].allocated)]);}
         }
       }
       if(source==='expense_payment'&&sourceId)await c.query("UPDATE expenses SET status='approved',paid_at=NULL,payment_journal_entry_id=NULL WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
