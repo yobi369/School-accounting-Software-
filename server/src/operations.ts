@@ -278,9 +278,9 @@ operationsRouter.post('/fees/structures/:id/invoice-class',requirePermission('fe
 const invoiceSchema=z.object({
   studentId:z.string().uuid(), invoiceNumber:z.string().trim().min(1).max(60).optional(),
   academicYear:z.string().trim().min(2).max(30), description:z.string().trim().min(2).max(500).optional(),
-  issuedOn:z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/).optional(),
-  dueOn:z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/), amount:z.string().optional(),
-  items:z.array(z.object({itemName:z.string().trim().min(1).max(120),description:z.string().trim().max(500).optional(),amount:z.string().regex(/^\\d+(?:\\.\\d{1,2})?$/)})).min(1).max(100).optional(),
+  issuedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  dueOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/), amount:z.string().optional(),
+  items:z.array(z.object({itemName:z.string().trim().min(1).max(120),description:z.string().trim().max(500).optional(),amount:z.string().regex(/^\d+(?:\.\d{1,2})?$/)})).min(1).max(100).optional(),
 });
 operationsRouter.get('/fees/invoices',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;
