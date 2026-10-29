@@ -378,7 +378,7 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
       if(d.paymentMethod==='bank'){const mapped=await c.query('SELECT id FROM bank_accounts WHERE school_id=$1 AND ledger_account_id=$2 AND is_active=true LIMIT 1',[auth.schoolId,d.paymentAccountId]);if(!mapped.rowCount)throw Object.assign(new Error('Bank payments must use a ledger account mapped to an active Bank Account under Cash & Bank settings.'),{statusCode:422});}
       if(d.paymentMethod==='mpesa'&&d.externalReference?.trim()){await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`mpesa-reference:${auth.schoolId}:${d.externalReference.trim().toLowerCase()}`]);const duplicate=await c.query("SELECT id FROM fee_receipts WHERE school_id=$1 AND payment_method='mpesa' AND lower(external_reference)=lower($2) AND status='posted' LIMIT 1",[auth.schoolId,d.externalReference.trim()]);if(duplicate.rowCount)throw Object.assign(new Error('This M-Pesa transaction reference has already been recorded.'),{statusCode:409});}
       await c.query("SELECT id FROM fee_invoices WHERE school_id=$1 AND student_id=$2 AND status NOT IN ('void','reversed') ORDER BY id FOR UPDATE",[auth.schoolId,d.studentId]);
-      const previous=await c.query(`SELECT COALESCE(sum(i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)),0)::numeric(14,2)::text AS balance FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status NOT IN ('void','reversed')`,[auth.schoolId,d.studentId]);const previousBalance=String(previous.rows[0].balance??'0.00');
+      const previous=await c.query(`SELECT (COALESCE(sum(i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)),0)-COALESCE((SELECT sum(cr.remaining_amount) FROM student_fee_credits cr WHERE cr.school_id=$1 AND cr.student_id=$2 AND cr.status='posted'),0))::numeric(14,2)::text AS balance FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status NOT IN ('void','reversed')`,[auth.schoolId,d.studentId]);const previousBalance=String(previous.rows[0].balance??'0.00');
       const receiptId=randomUUID();const receiptNumber=d.receiptNumber??await nextFeeDocumentNumber(c,auth.schoolId,'RCT',receivedOn);const studentCredit=amount-allocationTotal;
       await c.query(
         "INSERT INTO fee_receipts (id,school_id,receipt_number,student_id,received_on,amount,payment_method,external_reference,notes,received_by,previous_balance,new_balance) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULL)",
@@ -1076,6 +1076,15 @@ operationsRouter.get('/fees/statements/:studentId',requirePermission('fees.read'
      SELECT w.waived_on,'Waiver / adjustment',w.waiver_number,w.reason,0::numeric(14,2),w.amount::numeric(14,2),3
      FROM fee_waivers w JOIN fee_invoices i ON i.school_id=w.school_id AND i.id=w.invoice_id
      WHERE w.school_id=$1 AND i.student_id=$2 AND w.status IN ('posted','reversed')
+     UNION ALL
+     SELECT r.received_on,'Student credit',r.receipt_number,'Unallocated payment held as student credit',0::numeric(14,2),cr.amount::numeric(14,2),5
+     FROM student_fee_credits cr JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id
+     WHERE cr.school_id=$1 AND cr.student_id=$2
+     UNION ALL
+     SELECT rev.posting_date,'Reversal',r.receipt_number,'Reversal of student credit balance',cr.amount::numeric(14,2),0::numeric(14,2),4
+     FROM student_fee_credits cr JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id
+     JOIN journal_entries rev ON rev.school_id=r.school_id AND rev.reversal_of_id=r.journal_entry_id AND rev.status='posted'
+     WHERE cr.school_id=$1 AND cr.student_id=$2 AND cr.status='reversed'
      UNION ALL
      SELECT rev.posting_date,'Reversal',r.receipt_number,'Reversal of receipt allocation for invoice '||i.invoice_number,
        a.amount::numeric(14,2),0::numeric(14,2),4
