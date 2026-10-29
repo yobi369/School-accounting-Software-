@@ -38,7 +38,7 @@ const labels:Record<string,string>={
   posted_count:'Posted journals',awaiting_approval:'Awaiting approval',approved_unpaid:'Approved unpaid',
   collected:'Fees collected',unmatched:'Unmatched lines',paid_total:'Expenses paid',
 };
-const formatTableValue=(key:string,value:unknown):string=>{if(value===null||value===undefined)return '—';if(typeof value==='string'&&/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)?$/.test(value)){const date=new Date(value);if(!Number.isNaN(date.getTime()))return new Intl.DateTimeFormat('en-KE',{day:'2-digit',month:'short',year:'numeric',...(value.includes('T')?{hour:'2-digit',minute:'2-digit',hour12:true,timeZone:'Africa/Nairobi'}:{timeZone:'Africa/Nairobi'})}).format(date);}return human(value);};
+const formatTableValue=(_key:string,value:unknown):string=>{if(value===null||value===undefined)return '—';if(typeof value==='string'&&/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)?$/.test(value)){const date=new Date(value);if(!Number.isNaN(date.getTime()))return new Intl.DateTimeFormat('en-KE',{day:'2-digit',month:'short',year:'numeric',...(value.includes('T')?{hour:'2-digit',minute:'2-digit',hour12:true,timeZone:'Africa/Nairobi'}:{timeZone:'Africa/Nairobi'})}).format(date);}return human(value);};
 const human=(value:unknown):string=>{
   if(value===null||value===undefined)return '—';
   if(typeof value==='object')return JSON.stringify(value);
