@@ -359,9 +359,11 @@ operationsRouter.get('/fees/receipts',requirePermission('fees.read'),wrap(async(
   res.json({receipts:result.rows});
 }));
 
+const isoCalendarDateSchema=z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value=>value.slice(0,4)!=='0000'&&!Number.isNaN(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value,'Enter a valid calendar date in YYYY-MM-DD format.');
+
 export const receiptSchema=z.object({
   studentId:z.string().uuid(),receiptNumber:z.string().trim().min(1).max(60).optional(),
-  receivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  receivedOn:isoCalendarDateSchema.optional(),
   amount:z.string().regex(/^\d+(?:\.\d{1,2})?$/),paymentAccountId:z.string().uuid(),paymentMethod:z.enum(['cash','bank','mpesa','cheque','other']),
   externalReference:z.string().trim().max(160).optional(),
   notes:z.string().trim().max(500).optional(),
