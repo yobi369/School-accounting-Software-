@@ -14,6 +14,13 @@ describe('fee receipt input validation', () => {
     expect(receiptSchema.safeParse(validReceipt).success).toBe(true);
   });
 
+  it('accepts real calendar dates and rejects impossible receipt dates', () => {
+    expect(receiptSchema.safeParse({ ...validReceipt, receivedOn: '2024-02-29' }).success).toBe(true);
+    for (const receivedOn of ['2025-02-29', '2026-13-01', '2026-04-31', '0000-01-01']) {
+      expect(receiptSchema.safeParse({ ...validReceipt, receivedOn }).success).toBe(false);
+    }
+  });
+
   it('requires a reference for bank receipts', () => {
     const result = receiptSchema.safeParse({ ...validReceipt, paymentMethod: 'bank' });
     expect(result.success).toBe(false);
