@@ -26,3 +26,15 @@ CREATE TABLE IF NOT EXISTS student_fee_credit_allocations (
 );
 CREATE INDEX IF NOT EXISTS student_fee_credit_allocations_invoice_idx
   ON student_fee_credit_allocations (school_id, invoice_id);
+
+ALTER TABLE student_fee_credits ENABLE ROW LEVEL SECURITY;
+ALTER TABLE student_fee_credits FORCE ROW LEVEL SECURITY;
+CREATE POLICY student_fee_credits_school_isolation ON student_fee_credits
+  USING (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid)
+  WITH CHECK (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid);
+ALTER TABLE student_fee_credit_allocations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE student_fee_credit_allocations FORCE ROW LEVEL SECURITY;
+CREATE POLICY student_fee_credit_allocations_school_isolation ON student_fee_credit_allocations
+  USING (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid)
+  WITH CHECK (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid);
+GRANT SELECT, INSERT, UPDATE, DELETE ON student_fee_credits, student_fee_credit_allocations TO shuleledger_app;
