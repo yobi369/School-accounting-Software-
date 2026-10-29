@@ -37,4 +37,9 @@ ALTER TABLE student_fee_credit_allocations FORCE ROW LEVEL SECURITY;
 CREATE POLICY student_fee_credit_allocations_school_isolation ON student_fee_credit_allocations
   USING (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid)
   WITH CHECK (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid);
-GRANT SELECT, INSERT, UPDATE, DELETE ON student_fee_credits, student_fee_credit_allocations TO shuleledger_app;
+DO $role_grants$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shuleledger_app') THEN
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON student_fee_credits, student_fee_credit_allocations TO shuleledger_app;';
+  END IF;
+END $role_grants$;
