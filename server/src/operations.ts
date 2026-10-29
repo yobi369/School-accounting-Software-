@@ -378,6 +378,7 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
   if(amount>allocationTotal&&!d.allowStudentCredit){res.status(422).json({error:'The unallocated amount must be explicitly recorded as a Student Credit Balance.'});return;}
   try{
     const outcome=await withSchoolTransaction(auth.schoolId,async c=>{
+      await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`receipt-idempotency:${auth.schoolId}:${idempotencyKey}`]);
       const existing=await c.query('SELECT request_hash,response_body FROM idempotency_records WHERE school_id=$1 AND idempotency_key=$2 FOR UPDATE',[auth.schoolId,idempotencyKey]);
       if(existing.rowCount){
         if(existing.rows[0].request_hash!==requestHash)throw Object.assign(new Error('Idempotency key was already used for a different receipt request.'),{statusCode:409});
