@@ -346,10 +346,10 @@ operationsRouter.get('/fees/receipts',requirePermission('fees.read'),wrap(async(
 const receiptSchema=z.object({
   studentId:z.string().uuid(),receiptNumber:z.string().trim().min(1).max(60).optional(),
   receivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  amount:z.string(),paymentAccountId:z.string().uuid(),paymentMethod:z.enum(['cash','bank','mpesa','cheque','other']),
+  amount:z.string().regex(/^\d+(?:\.\d{1,2})?$/),paymentAccountId:z.string().uuid(),paymentMethod:z.enum(['cash','bank','mpesa','cheque','other']),
   externalReference:z.string().trim().max(160).optional(),
   notes:z.string().trim().max(500).optional(),
-  allocations:z.array(z.object({invoiceId:z.string().uuid(),amount:z.string()})).max(100).default([]),
+  allocations:z.array(z.object({invoiceId:z.string().uuid(),amount:z.string().regex(/^\d+(?:\.\d{1,2})?$/)})).max(100).default([]),
   allowStudentCredit:z.boolean().optional().default(false),
 }).superRefine((data,ctx)=>{if((data.paymentMethod==='bank'||data.paymentMethod==='mpesa')&&!data.externalReference?.trim())ctx.addIssue({code:'custom',path:['externalReference'],message:'Payment reference is required for Bank and M-Pesa receipts.'});});
 operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap(async(req,res)=>{
