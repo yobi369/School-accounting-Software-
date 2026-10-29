@@ -24,18 +24,14 @@ const navigation=[
   {id:'settings',label:'School settings',icon:'⚙'},
 ] as const;
 const labels:Record<string,string>={
-  id:'ID',admission_number:'Admission no.',full_name:'Name',class_name:'Class',sex:'Sex',date_of_birth:'Date of birth',guardian_name:'Parent / guardian',guardian_relationship:'Guardian relationship',guardian_phone:'Guardian phone',guardian_alternate_phone:'Alternate guardian phone',home_address:'Home address',emergency_contact_name:'Emergency contact',emergency_contact_phone:'Emergency phone',status:'Status',
-  invoice_number:'Invoice',student_name:'Student',academic_year:'Academic year',issued_on:'Issued',
-  due_on:'Due date',amount:'Amount (KES)',allocated:'Paid (KES)',outstanding:'Outstanding (KES)',total_fees:'Total fees (KES)',eligible_students:'Students',invoices_created:'Invoices created',version:'Version',days_1_30:'1–30 days (KES)',days_31_60:'31–60 days (KES)',days_61_90:'61–90 days (KES)',days_over_90:'90+ days (KES)',total_outstanding:'Total outstanding (KES)',total_fees:'Total fees (KES)',eligible_students:'Students',invoices_created:'Invoices created',adjustment_type:'Adjustment type',requested_by:'Requested by',approved_by:'Approved by',rejection_reason:'Rejection reason',academic_term_id:'Academic term',term_name:'Term',class_name:'Class',waived:'Adjustment (KES)',adjustment:'Adjustment (KES)',allocated_invoice:'Allocated invoice',
-  receipt_number:'Receipt No.',received_on:'Date',payment_method:'Method',external_reference:'Reference',allocated_invoices:'Allocated invoice',invoice_number:'Invoice',expense_number:'Expense ref',academic_term_id:'Academic term ID',
-  category:'Category',description:'Description',incurred_on:'Date',approved_at:'Approved at',
-  paid_at:'Paid at',entry_number:'Entry no.',posting_date:'Posting date',account_type:'Account type',
-  code:'Code',name:'Name',debit:'Debit',credit:'Credit',total_debit:'Debit total',total_credit:'Credit total',
-  role:'Role',email:'Email',membership_status:'Membership',action:'Action',entity_type:'Record type',
-  entity_id:'Record ID',created_at:'Created at',bank_name:'Bank',account_number_masked:'Account',
-  transaction_date:'Date',reference:'Reference',matched_at:'Matched at',starts_on:'Starts',ends_on:'Ends',
-  financial_year_name:'Financial year',period_id:'Period ID',year_starts_on:'Year starts',year_ends_on:'Year ends',
-  posted_count:'Posted journals',awaiting_approval:'Awaiting approval',approved_unpaid:'Approved unpaid',
+  id:'ID',admission_number:'Admission no.',full_name:'Name',class_name:'Class / stream',sex:'Sex',date_of_birth:'Date of birth',guardian_name:'Parent / guardian',guardian_relationship:'Guardian relationship',guardian_phone:'Guardian phone',guardian_alternate_phone:'Alternate guardian phone',home_address:'Home address',emergency_contact_name:'Emergency contact',emergency_contact_phone:'Emergency phone',status:'Status',
+  invoice_number:'Invoice',student_name:'Student',academic_year:'Academic year',issued_on:'Issued',due_on:'Due date',amount:'Amount (KES)',allocated:'Paid (KES)',credited:'Credit applied (KES)',outstanding:'Balance (KES)',waived:'Adjustment (KES)',adjustment:'Adjustment (KES)',term_name:'Term',academic_term_id:'Academic term',version:'Version',
+  total_fees:'Total fees (KES)',eligible_students:'Students',invoices_created:'Invoices created',days_1_30:'1–30 days (KES)',days_31_60:'31–60 days (KES)',days_61_90:'61–90 days (KES)',days_over_90:'90+ days (KES)',total_outstanding:'Total outstanding (KES)',
+  receipt_number:'Receipt No.',received_on:'Date',payment_method:'Method',external_reference:'Reference',allocated_invoice:'Allocated invoice',student_credit_amount:'Student credit (KES)',remaining_amount:'Available credit (KES)',adjustment_type:'Adjustment type',rejection_reason:'Rejection reason',
+  expense_number:'Expense ref',category:'Category',description:'Description',incurred_on:'Date',approved_at:'Approved at',paid_at:'Paid at',entry_number:'Entry no.',posting_date:'Posting date',account_type:'Account type',
+  code:'Code',name:'Name',debit:'Debit',credit:'Credit',total_debit:'Debit total',total_credit:'Credit total',role:'Role',email:'Email',membership_status:'Membership',action:'Action',entity_type:'Record type',
+  entity_id:'Record ID',created_at:'Created at',bank_name:'Bank',account_number_masked:'Account',transaction_date:'Date',reference:'Reference',matched_at:'Matched at',starts_on:'Starts',ends_on:'Ends',
+  financial_year_name:'Financial year',period_id:'Period ID',year_starts_on:'Year starts',year_ends_on:'Year ends',posted_count:'Posted journals',awaiting_approval:'Awaiting approval',approved_unpaid:'Approved unpaid',
   collected:'Fees collected',unmatched:'Unmatched lines',paid_total:'Expenses paid',
 };
 const formatTableValue=(_key:string,value:unknown):string=>{if(value===null||value===undefined)return '—';if(typeof value==='string'&&/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)?$/.test(value)){const date=new Date(value);if(!Number.isNaN(date.getTime()))return new Intl.DateTimeFormat('en-KE',{day:'2-digit',month:'short',year:'numeric',...(value.includes('T')?{hour:'2-digit',minute:'2-digit',hour12:true,timeZone:'Africa/Nairobi'}:{timeZone:'Africa/Nairobi'})}).format(date);}return human(value);};
