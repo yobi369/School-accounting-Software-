@@ -7,7 +7,7 @@ ALTER TABLE fee_waivers ALTER COLUMN status DROP DEFAULT;
 ALTER TABLE fee_waivers ALTER COLUMN status TYPE text USING status::text;
 ALTER TABLE fee_waivers ALTER COLUMN status SET DEFAULT 'submitted';
 
-DO $
+DO $body$
 DECLARE item record;
 BEGIN
   FOR item IN
@@ -19,7 +19,7 @@ BEGIN
   LOOP
     EXECUTE format('ALTER TABLE fee_waivers DROP CONSTRAINT %I', item.conname);
   END LOOP;
-END $$;
+END $body$;
 
 ALTER TABLE fee_waivers
   ADD CONSTRAINT fee_waivers_status_review_check
