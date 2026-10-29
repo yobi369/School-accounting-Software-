@@ -276,16 +276,18 @@ operationsRouter.post('/fees/structures/:id/invoice-class',requirePermission('fe
 }));
 
 const invoiceSchema=z.object({
-  studentId:z.string().uuid(), invoiceNumber:z.string().trim().min(1).max(60),
-  academicYear:z.string().trim().min(2).max(30), description:z.string().trim().min(2).max(500),
-  issuedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  dueOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/), amount:z.string(),
+  studentId:z.string().uuid(), invoiceNumber:z.string().trim().min(1).max(60).optional(),
+  academicYear:z.string().trim().min(2).max(30), description:z.string().trim().min(2).max(500).optional(),
+  issuedOn:z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/).optional(),
+  dueOn:z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/), amount:z.string().optional(),
+  items:z.array(z.object({itemName:z.string().trim().min(1).max(120),description:z.string().trim().max(500).optional(),amount:z.string().regex(/^\\d+(?:\\.\\d{1,2})?$/)})).min(1).max(100).optional(),
 });
 operationsRouter.get('/fees/invoices',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
-    `SELECT i.id,i.invoice_number,i.student_id,s.admission_number,s.full_name AS student_name,
+    `SELECT i.id,i.invoice_number,i.student_id,s.admission_number,s.full_name AS student_name,s.class_name,
       i.academic_year,i.description,i.issued_on,i.due_on,i.amount::text,i.status,
+      COALESCE((SELECT json_agg(json_build_object('itemName',ii.item_name,'description',ii.description,'amount',ii.amount::text) ORDER BY ii.line_number) FROM fee_invoice_items ii WHERE ii.school_id=i.school_id AND ii.invoice_id=i.id),'[]'::json) AS items,
       COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
       (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
      FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
@@ -294,23 +296,26 @@ operationsRouter.get('/fees/invoices',requirePermission('fees.read'),wrap(async(
 }));
 operationsRouter.post('/fees/invoices',requirePermission('fees.manage'),wrap(async(req,res)=>{
   const parsed=invoiceSchema.safeParse(req.body); if(!parsed.success){res.status(400).json({error:'Invalid invoice details.',details:parsed.error.flatten()});return;}
-  const d=parsed.data; const auth=authContext(req); const issuedOn=d.issuedOn??new Date().toISOString().slice(0,10);
-  const minor=parseKesToMinorUnits(d.amount); if(minor<=0n){res.status(422).json({error:'Invoice amount must be greater than zero.'});return;}
+  const d=parsed.data; const auth=authContext(req); const issuedOn=d.issuedOn??todayIso();
+  const lineItems=(d.items??(d.amount&&d.description?[{itemName:d.description,description:d.description,amount:d.amount}]:[])).map(item=>({itemName:item.itemName,description:item.description??'',minor:parseKesToMinorUnits(item.amount)}));
+  if(!lineItems.length||lineItems.some(item=>item.minor<=0n)){res.status(422).json({error:'Provide at least one invoice line item with a positive amount.'});return;}
+  const minor=lineItems.reduce((sum,item)=>sum+item.minor,0n);const description=(d.description??lineItems.map(item=>item.itemName).join(', ')).trim();
   if(d.dueOn<issuedOn){res.status(422).json({error:'Due date cannot be before issue date.'});return;}
   try {
     const invoice=await withSchoolTransaction(auth.schoolId,async c=>{
       const student=await c.query("SELECT id FROM students WHERE school_id=$1 AND id=$2 AND status='active'",[auth.schoolId,d.studentId]);
       if(!student.rowCount) throw Object.assign(new Error('Active student not found in this school.'),{statusCode:422});
-      const id=randomUUID();
+      const id=randomUUID();const invoiceNumber=d.invoiceNumber??await nextFeeDocumentNumber(c,auth.schoolId,'INV',issuedOn);
       await c.query(
         "INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,issued_on,due_on,amount,status,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'issued',$10)",
-        [id,auth.schoolId,d.studentId,d.invoiceNumber,d.academicYear,d.description,issuedOn,d.dueOn,amountString(minor),auth.userId]);
-      const journal=await postJournal(c,auth.schoolId,auth.userId,issuedOn,`Fee invoice ${d.invoiceNumber}: ${d.description}`,'fee_invoice',id,[
+        [id,auth.schoolId,d.studentId,invoiceNumber,d.academicYear,description,issuedOn,d.dueOn,amountString(minor),auth.userId]);
+      for(let index=0;index<lineItems.length;index++){const item=lineItems[index];await c.query('INSERT INTO fee_invoice_items (id,school_id,invoice_id,line_number,item_name,description,amount) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),auth.schoolId,id,index+1,item.itemName,item.description,amountString(item.minor)]);}
+      const journal=await postJournal(c,auth.schoolId,auth.userId,issuedOn,`Fee invoice ${invoiceNumber}: ${description}`,'fee_invoice',id,[
         {accountCode:'1200',debit:amountString(minor),credit:'0.00'},
         {accountCode:'4000',debit:'0.00',credit:amountString(minor)},
       ]);
-      await audit(c,auth.schoolId,auth.userId,'fee.invoice.issue','fee_invoice',id,{invoiceNumber:d.invoiceNumber,journalEntryId:journal.id,amount:amountString(minor)});
-      return {id,invoiceNumber:d.invoiceNumber,studentId:d.studentId,issuedOn,dueOn:d.dueOn,amount:amountString(minor),status:'issued',journalEntryId:journal.id};
+      await audit(c,auth.schoolId,auth.userId,'fee.invoice.issue','fee_invoice',id,{invoiceNumber,journalEntryId:journal.id,amount:amountString(minor),itemCount:lineItems.length});
+      return {id,invoiceNumber,studentId:d.studentId,issuedOn,dueOn:d.dueOn,amount:amountString(minor),items:lineItems.map(item=>({itemName:item.itemName,description:item.description,amount:amountString(item.minor)})),status:'issued',journalEntryId:journal.id};
     });
     res.status(201).json({invoice});
   } catch(error){if(!handleError(res,error))throw error;}
@@ -335,7 +340,7 @@ operationsRouter.get('/fees/receipts',requirePermission('fees.read'),wrap(async(
 }));
 
 const receiptSchema=z.object({
-  studentId:z.string().uuid(),receiptNumber:z.string().trim().min(1).max(60),
+  studentId:z.string().uuid(),receiptNumber:z.string().trim().min(1).max(60).optional(),
   receivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   amount:z.string(),paymentAccountId:z.string().uuid(),paymentMethod:z.enum(['cash','bank','mpesa','cheque','other']),
   externalReference:z.string().trim().max(160).optional(),
@@ -362,10 +367,10 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
       const cashAccount=await c.query("SELECT id,account_type,is_active FROM accounts WHERE school_id=$1 AND id=$2",[auth.schoolId,d.paymentAccountId]);
       if(!cashAccount.rowCount||cashAccount.rows[0].account_type!=='asset'||!cashAccount.rows[0].is_active)throw Object.assign(new Error('Select an active cash or bank asset account.'),{statusCode:422});
       if(d.paymentMethod==='mpesa'&&d.externalReference?.trim()){const duplicate=await c.query("SELECT id FROM fee_receipts WHERE school_id=$1 AND payment_method='mpesa' AND lower(external_reference)=lower($2) AND status='posted' LIMIT 1",[auth.schoolId,d.externalReference.trim()]);if(duplicate.rowCount)throw Object.assign(new Error('This M-Pesa transaction reference has already been recorded.'),{statusCode:409});}
-      const receiptId=randomUUID();
+      const receiptId=randomUUID();const receiptNumber=d.receiptNumber??await nextFeeDocumentNumber(c,auth.schoolId,'RCT',receivedOn);
       await c.query(
         "INSERT INTO fee_receipts (id,school_id,receipt_number,student_id,received_on,amount,payment_method,external_reference,notes,received_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-        [receiptId,auth.schoolId,d.receiptNumber,d.studentId,receivedOn,amountString(amount),d.paymentMethod,d.externalReference??null,d.notes??null,auth.userId]);
+        [receiptId,auth.schoolId,receiptNumber,d.studentId,receivedOn,amountString(amount),d.paymentMethod,d.externalReference??null,d.notes??null,auth.userId]);
       for(const allocation of d.allocations){
         const allocated=parseKesToMinorUnits(allocation.amount);
         if(allocated<=0n)throw Object.assign(new Error('Each allocation must be greater than zero.'),{statusCode:422});
@@ -379,7 +384,7 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
         if(allocated>outstanding)throw Object.assign(new Error('Allocation exceeds the invoice outstanding balance.'),{statusCode:422});
         await c.query('INSERT INTO fee_receipt_allocations (school_id,receipt_id,invoice_id,amount) VALUES ($1,$2,$3,$4)',[auth.schoolId,receiptId,allocation.invoiceId,amountString(allocated)]);
       }
-      const journal=await postJournal(c,auth.schoolId,auth.userId,receivedOn,`Fee receipt ${d.receiptNumber}`,'fee_receipt',receiptId,[
+      const journal=await postJournal(c,auth.schoolId,auth.userId,receivedOn,`Fee receipt ${receiptNumber}`,'fee_receipt',receiptId,[
         {accountId:d.paymentAccountId,debit:amountString(amount),credit:'0.00'},
         {accountCode:'1200',debit:'0.00',credit:amountString(amount)},
       ]);
@@ -391,8 +396,8 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
           ELSE 'issued' END
          WHERE i.school_id=$1 AND i.id=ANY($2::uuid[])`,
         [auth.schoolId,d.allocations.map(a=>a.invoiceId)]);
-      await audit(c,auth.schoolId,auth.userId,'fee.receipt.post','fee_receipt',receiptId,{receiptNumber:d.receiptNumber,journalEntryId:journal.id,amount:amountString(amount)});
-      const receipt={id:receiptId,receiptNumber:d.receiptNumber,studentId:d.studentId,receivedOn,amount:amountString(amount),paymentMethod:d.paymentMethod,status:'posted',journalEntryId:journal.id};
+      await audit(c,auth.schoolId,auth.userId,'fee.receipt.post','fee_receipt',receiptId,{receiptNumber,journalEntryId:journal.id,amount:amountString(amount)});
+      const receipt={id:receiptId,receiptNumber,studentId:d.studentId,receivedOn,amount:amountString(amount),paymentMethod:d.paymentMethod,status:'posted',journalEntryId:journal.id};
       await c.query('INSERT INTO idempotency_records (school_id,idempotency_key,request_hash,response_status,response_body,resource_type,resource_id) VALUES ($1,$2,$3,201,$4::jsonb,\'fee_receipt\',$5)',[auth.schoolId,idempotencyKey,requestHash,JSON.stringify({receipt}),receiptId]);
       return {receipt,duplicate:false};
     });
@@ -1244,6 +1249,287 @@ operationsRouter.post('/accounting/years/:id/close',requirePermission('periods.m
 }));
 
 function todayIso(){return new Date().toISOString().slice(0,10);}
+async function nextFeeDocumentNumber(c:PoolClient,schoolId:string,prefix:'INV'|'RCT',date:string):Promise<string>{const year=date.slice(0,4);const table=prefix==='INV'?'fee_invoices':'fee_receipts';const column=prefix==='INV'?'invoice_number':'receipt_number';const lockKey=`fee-number:${schoolId}:${prefix}:${year}`;await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[lockKey]);const base=`${prefix}-${year}-`;const result=await c.query(`SELECT COALESCE(MAX(CASE WHEN substring(${column} from $3) ~ '^[0-9]+
+
+operationsRouter.get('/budgets',requirePermission('reports.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);
+  const yearId=typeof req.query.financialYearId==='string'?req.query.financialYearId:null;
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    `SELECT b.id,b.name,b.financial_year_id,y.name AS financial_year_name,b.account_id,a.code,a.name AS account_name,
+      b.budget_amount::text,b.status,b.approved_at,
+      COALESCE((SELECT sum(l.debit-l.credit) FROM journal_lines l JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id WHERE l.school_id=b.school_id AND l.account_id=b.account_id AND j.financial_year_id=b.financial_year_id AND j.status='posted'),0)::text AS actual
+     FROM budgets b JOIN financial_years y ON y.id=b.financial_year_id AND y.school_id=b.school_id
+     JOIN accounts a ON a.id=b.account_id AND a.school_id=b.school_id
+     WHERE b.school_id=$1 AND ($2::uuid IS NULL OR b.financial_year_id=$2)
+     ORDER BY y.starts_on DESC,a.code,b.name`,[auth.schoolId,yearId]));
+  res.json({budgets:result.rows});
+}));
+operationsRouter.post('/budgets',requirePermission('periods.manage'),wrap(async(req,res)=>{
+  const p=z.object({financialYearId:z.string().uuid(),accountId:z.string().uuid(),name:z.string().trim().min(2).max(120),budgetAmount:z.string()}).safeParse(req.body);
+  if(!p.success){res.status(400).json({error:'Invalid budget details.',details:p.error.flatten()});return;}
+  const auth=authContext(req);const d=p.data;const amount=parseKesToMinorUnits(d.budgetAmount);
+  try{
+    const budget=await withSchoolTransaction(auth.schoolId,async c=>{
+      const year=await c.query("SELECT id FROM financial_years WHERE school_id=$1 AND id=$2 AND status='open'",[auth.schoolId,d.financialYearId]);
+      const account=await c.query("SELECT id,account_type FROM accounts WHERE school_id=$1 AND id=$2 AND is_active=true",[auth.schoolId,d.accountId]);
+      if(!year.rowCount||!account.rowCount||account.rows[0].account_type!=='expense')throw Object.assign(new Error('Select an open financial year and active expense account.'),{statusCode:422});
+      const r=await c.query('INSERT INTO budgets (school_id,financial_year_id,account_id,name,budget_amount,created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,name,financial_year_id,account_id,budget_amount::text,status',[auth.schoolId,d.financialYearId,d.accountId,d.name,amountString(amount),auth.userId]);
+      await audit(c,auth.schoolId,auth.userId,'budget.create','budget',r.rows[0].id);
+      return r.rows[0];
+    });
+    res.status(201).json({budget});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+operationsRouter.post('/budgets/:id/approve',requirePermission('periods.manage'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid budget ID.'});return;}
+  const auth=authContext(req);
+  try{
+    const budget=await withSchoolTransaction(auth.schoolId,async c=>{
+      const r=await c.query("SELECT id,status,created_by FROM budgets WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
+      if(!r.rowCount||r.rows[0].status!=='draft')throw Object.assign(new Error('Only a draft budget can be approved.'),{statusCode:409});
+      if(r.rows[0].created_by&&String(r.rows[0].created_by)===auth.userId)throw Object.assign(new Error('The budget creator cannot approve their own budget.'),{statusCode:403});
+      await c.query("UPDATE budgets SET status='approved',approved_by=$3,approved_at=now() WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data,auth.userId]);
+      await audit(c,auth.schoolId,auth.userId,'budget.approve','budget',id.data);
+      return {id:id.data,status:'approved'};
+    });
+    res.json({budget});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
+operationsRouter.get('/reports/trial-balance',requirePermission('reports.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);const dates=reportDateFilters(req,res);if(!dates)return;
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    `SELECT a.id,a.code,a.name,a.account_type,
+      COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.debit ELSE 0 END),0)::text AS debit,
+      COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.credit ELSE 0 END),0)::text AS credit,
+      COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.debit-l.credit ELSE 0 END),0)::text AS net
+     FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
+     LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
+       AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+     WHERE a.school_id=$1 AND a.is_active=true
+     GROUP BY a.id ORDER BY a.code`,[auth.schoolId,dates.from,dates.to]));
+  const rows=result.rows.map(r=>({...r,debit:r.debit??'0.00',credit:r.credit??'0.00',net:r.net??'0.00'}));
+  const totals=rows.reduce((acc,r)=>({debit:acc.debit+parseKesToMinorUnits(String(r.debit)),credit:acc.credit+parseKesToMinorUnits(String(r.credit))}),{debit:0n,credit:0n});
+  res.json({report:'trial-balance',currency:'KES',from:dates.from,to:dates.to,rows,totals:{debit:amountString(totals.debit),credit:amountString(totals.credit),balanced:totals.debit===totals.credit}});
+}));
+
+operationsRouter.get('/reports/income-statement',requirePermission('reports.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);const dates=reportDateFilters(req,res);if(!dates)return;
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    `SELECT a.code,a.name,a.account_type,
+      COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.credit-l.debit ELSE 0 END),0)::text AS balance
+     FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
+     LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
+       AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+     WHERE a.school_id=$1 AND a.account_type IN ('income','expense')
+     GROUP BY a.id ORDER BY a.account_type,a.code`,[auth.schoolId,dates.from,dates.to]));
+  const signedMinor=(value:unknown):bigint=>{const raw=String(value??'0.00');const negative=raw.startsWith('-');const parsed=parseKesToMinorUnits(negative?raw.slice(1):raw);return negative?-parsed:parsed;};
+  const rows=result.rows.map(r=>({...r,balance:amountString(r.account_type==='expense'?-signedMinor(r.balance):signedMinor(r.balance))}));
+  let incomeMinor=0n;let expensesMinor=0n;
+  for(const row of rows){const amount=signedMinor(row.balance);if(row.account_type==='income')incomeMinor+=amount;else expensesMinor+=amount;}
+  res.json({report:'income-statement',currency:'KES',from:dates.from,to:dates.to,rows,totals:{income:amountString(incomeMinor),expenses:amountString(expensesMinor),surplus:amountString(incomeMinor-expensesMinor)}});
+}));
+
+operationsRouter.get('/reports/fee-balances',requirePermission('reports.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);const dates=reportDateFilters(req,res);if(!dates)return;const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    `SELECT s.admission_number,s.full_name,i.invoice_number,i.academic_year,i.due_on,i.amount::text,
+      COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)::text AS allocated,
+      COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
+      (i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
+     FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
+     LEFT JOIN fee_receipt_allocations a ON a.school_id=i.school_id AND a.invoice_id=i.id
+     LEFT JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
+     WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
+     GROUP BY i.id,s.id HAVING i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>0
+     ORDER BY i.due_on,s.full_name LIMIT 2000`,[auth.schoolId,dates.from,dates.to,academicTermId]));
+  res.json({report:'fee-balances',currency:'KES',rows:result.rows});
+}));
+
+
+const reportNames=['trial-balance','income-statement','balance-sheet','general-ledger','cashbook','bankbook','receipts-register','invoice-register','fee-balances','fee-aging','expense-register','supplier-payables','bank-reconciliation','budget-variance','journal-register','collections-by-method','fees-by-class','audit-trail'];
+async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:string|null,to:string|null,academicTermId:string|null):Promise<Record<string,unknown>[]>{
+  let sql='';
+  let params:unknown[]=[schoolId,from,to,academicTermId];
+  switch(name){
+    case 'trial-balance':
+      sql=`SELECT a.code,a.name,a.account_type,
+       COALESCE(sum(l.debit) FILTER (WHERE j.id IS NOT NULL),0)::text AS debit,
+       COALESCE(sum(l.credit) FILTER (WHERE j.id IS NOT NULL),0)::text AS credit,
+       COALESCE(sum(l.debit-l.credit) FILTER (WHERE j.id IS NOT NULL),0)::text AS net
+       FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
+       LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
+       AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       WHERE a.school_id=$1 GROUP BY a.id ORDER BY a.code`;break;
+    case 'income-statement':
+      sql=`SELECT a.code,a.name,a.account_type,
+       COALESCE(sum(CASE WHEN j.id IS NOT NULL AND a.account_type='income' THEN l.credit-l.debit WHEN j.id IS NOT NULL THEN l.debit-l.credit ELSE 0 END),0)::text AS balance
+       FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
+       LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
+       AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       WHERE a.school_id=$1 AND a.account_type IN ('income','expense') GROUP BY a.id ORDER BY a.account_type,a.code`;break;
+    case 'balance-sheet':
+      sql=`SELECT a.code,a.name,a.account_type,
+       COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.debit-l.credit ELSE 0 END),0)::text AS debit_net,
+       COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.credit-l.debit ELSE 0 END),0)::text AS credit_net
+       FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
+       LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
+       AND ($2::date IS NULL OR j.posting_date <= $2::date)
+       WHERE a.school_id=$1 AND a.account_type IN ('asset','liability','equity') GROUP BY a.id ORDER BY a.account_type,a.code`;break;
+    case 'general-ledger':
+      sql=`SELECT j.entry_number,j.posting_date,j.description AS journal_description,a.code,a.name AS account_name,l.debit::text,l.credit::text,l.memo
+       FROM journal_entries j JOIN journal_lines l ON l.school_id=j.school_id AND l.journal_entry_id=j.id
+       JOIN accounts a ON a.school_id=l.school_id AND a.id=l.account_id
+       WHERE j.school_id=$1 AND j.status='posted' AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       ORDER BY j.posting_date,j.entry_number,l.line_number LIMIT 10000`;break;
+    case 'cashbook':
+    case 'bankbook':
+      sql=`SELECT j.posting_date,j.entry_number,j.description,a.code,a.name,l.debit::text,l.credit::text,l.memo
+       FROM journal_lines l JOIN accounts a ON a.id=l.account_id AND a.school_id=l.school_id
+       JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id
+       WHERE l.school_id=$1 AND j.status='posted' AND ${name==='cashbook'?"a.code='1000'":"EXISTS (SELECT 1 FROM bank_accounts ba WHERE ba.school_id=a.school_id AND ba.ledger_account_id=a.id)"}
+       AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       ORDER BY j.posting_date,j.entry_number LIMIT 10000`;break;
+    case 'receipts-register':
+      sql=`SELECT r.receipt_number,r.received_on,s.admission_number,s.full_name AS student,r.amount::text,r.payment_method,r.external_reference,r.status
+       FROM fee_receipts r JOIN students s ON s.id=r.student_id AND s.school_id=r.school_id
+       WHERE r.school_id=$1 AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
+       AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid))
+       ORDER BY r.received_on DESC,r.receipt_number LIMIT 5000`;break;
+    case 'invoice-register':
+      sql=`SELECT i.invoice_number,i.issued_on,i.due_on,s.admission_number,s.full_name AS student,i.academic_year,i.amount::text,i.status
+       FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
+       WHERE i.school_id=$1 AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
+       ORDER BY i.issued_on DESC,i.invoice_number LIMIT 5000`;break;
+    case 'fee-balances':
+      sql=`SELECT s.admission_number,s.full_name,i.invoice_number,i.academic_year,i.issued_on,i.due_on,i.amount::text,
+       COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
+       COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
+       (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
+       FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
+       WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
+       ORDER BY i.due_on,s.full_name LIMIT 5000`;break;
+    case 'fee-aging':
+      sql=`SELECT s.admission_number,s.full_name,i.invoice_number,i.due_on,
+       (CURRENT_DATE-i.due_on)::int AS days_overdue,
+       (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
+       FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
+       WHERE i.school_id=$1 AND i.status<>'void' AND i.due_on<CURRENT_DATE AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
+       ORDER BY i.due_on,s.full_name LIMIT 5000`;break;
+    case 'expense-register':
+      sql=`SELECT e.expense_number,e.incurred_on,e.category,e.description,e.amount::text,e.status,s.name AS supplier
+       FROM expenses e LEFT JOIN suppliers s ON s.id=e.supplier_id AND s.school_id=e.school_id
+       WHERE e.school_id=$1 AND ($2::date IS NULL OR e.incurred_on >= $2::date) AND ($3::date IS NULL OR e.incurred_on <= $3::date) AND ($4::uuid IS NULL OR e.academic_term_id=$4::uuid)
+       ORDER BY e.incurred_on DESC,e.expense_number LIMIT 5000`;break;
+    case 'supplier-payables':
+      sql=`SELECT COALESCE(s.name,'Unspecified supplier') AS supplier,e.expense_number,e.description,e.incurred_on,e.amount::text,e.status
+       FROM expenses e LEFT JOIN suppliers s ON s.id=e.supplier_id AND s.school_id=e.school_id
+       WHERE e.school_id=$1 AND e.status='approved' AND ($4::uuid IS NULL OR e.academic_term_id=$4::uuid) ORDER BY e.incurred_on,e.expense_number LIMIT 5000`;break;
+    case 'bank-reconciliation':
+      sql=`SELECT b.name AS bank_account,l.transaction_date,l.description,l.reference,l.amount::text,l.matched_at,l.matched_journal_line_id
+       FROM bank_statement_lines l JOIN bank_accounts b ON b.id=l.bank_account_id AND b.school_id=l.school_id
+       WHERE l.school_id=$1 AND ($2::date IS NULL OR l.transaction_date >= $2::date) AND ($3::date IS NULL OR l.transaction_date <= $3::date)
+       ORDER BY l.transaction_date DESC LIMIT 5000`;break;
+    case 'budget-variance':
+      sql=`SELECT y.name AS financial_year,a.code,a.name AS account,b.name AS budget_name,b.budget_amount::text,
+       COALESCE((SELECT sum(l.debit-l.credit) FROM journal_lines l JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id WHERE l.school_id=b.school_id AND l.account_id=b.account_id AND j.financial_year_id=b.financial_year_id AND j.status='posted'),0)::text AS actual,
+       (b.budget_amount-COALESCE((SELECT sum(l.debit-l.credit) FROM journal_lines l JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id WHERE l.school_id=b.school_id AND l.account_id=b.account_id AND j.financial_year_id=b.financial_year_id AND j.status='posted'),0))::numeric(14,2)::text AS remaining,b.status
+       FROM budgets b JOIN financial_years y ON y.id=b.financial_year_id AND y.school_id=b.school_id JOIN accounts a ON a.id=b.account_id AND a.school_id=b.school_id
+       WHERE b.school_id=$1 ORDER BY y.starts_on DESC,a.code`;break;
+    case 'journal-register':
+      sql=`SELECT j.entry_number,j.posting_date,j.description,j.source_type,j.source_id,j.status,j.posted_at,
+       COALESCE(sum(l.debit),0)::text AS total_debit,COALESCE(sum(l.credit),0)::text AS total_credit
+       FROM journal_entries j LEFT JOIN journal_lines l ON l.school_id=j.school_id AND l.journal_entry_id=j.id
+       WHERE j.school_id=$1 AND j.status='posted' AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+       GROUP BY j.id ORDER BY j.posting_date DESC,j.entry_number DESC LIMIT 5000`;break;
+    case 'collections-by-method':
+      sql=`SELECT r.payment_method,count(DISTINCT r.id)::int AS receipt_count,
+       COALESCE(sum(CASE WHEN $4::uuid IS NULL THEN r.amount ELSE (SELECT COALESCE(sum(a.amount),0) FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid) END),0)::text AS collected
+       FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)
+       AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND fs.academic_term_id=$4::uuid))
+       GROUP BY r.payment_method ORDER BY r.payment_method`;break;
+    case 'fees-by-class':
+      sql=`SELECT COALESCE(s.class_name,'Unassigned') AS class_name,count(DISTINCT CASE WHEN $2::uuid IS NULL THEN s.id ELSE i.student_id END)::int AS students,
+       COALESCE(sum(i.amount),0)::text AS invoiced
+       FROM students s LEFT JOIN fee_invoices i ON i.school_id=s.school_id AND i.student_id=s.id AND i.status<>'void' AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$2::uuid))
+       WHERE s.school_id=$1 GROUP BY s.class_name ORDER BY s.class_name`;break;
+    case 'audit-trail':
+      sql=`SELECT created_at,actor_user_id,action,entity_type,entity_id,request_id,metadata
+       FROM audit_events WHERE school_id=$1 AND ($2::date IS NULL OR created_at::date >= $2::date) AND ($3::date IS NULL OR created_at::date <= $3::date)
+       ORDER BY created_at DESC LIMIT 5000`;break;
+    default: throw Object.assign(new Error('Report not found.'),{statusCode:404});
+  }
+  const dateReports=['trial-balance','income-statement','general-ledger','cashbook','bankbook','receipts-register','invoice-register','fee-balances','expense-register','bank-reconciliation','journal-register','collections-by-method','audit-trail'];
+  const termReports=['receipts-register','invoice-register','fee-balances','fee-aging','collections-by-method','fees-by-class'];
+  if(name==='balance-sheet')params=[schoolId,to];
+  else if(name==='expense-register'||name==='supplier-payables')params=[schoolId,from,to,academicTermId];
+  else if(termReports.includes(name)&&dateReports.includes(name))params=[schoolId,from,to,academicTermId];
+  else if(name==='fees-by-class')params=[schoolId,academicTermId];
+  else if(termReports.includes(name))params=[schoolId,from,to,academicTermId];
+  else if(dateReports.includes(name))params=[schoolId,from,to];
+  else params=[schoolId];
+  const result=await c.query(sql,params);
+  return result.rows as Record<string,unknown>[];
+}
+function reportAcademicTermFilter(req:Request,res:Response):string|null|undefined{
+  const value=typeof req.query.academicTermId==='string'?req.query.academicTermId:null;
+  if(value&&!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)){res.status(400).json({error:'Academic term ID must be a valid UUID.'});return undefined;}
+  return value;
+}
+function reportDateFilters(req:Request,res:Response):{from:string|null;to:string|null}|null{
+  const from=typeof req.query.from==='string'?req.query.from:null;
+  const to=typeof req.query.to==='string'?req.query.to:null;
+  if((from&&!/^\d{4}-\d{2}-\d{2}$/.test(from))||(to&&!/^\d{4}-\d{2}-\d{2}$/.test(to))){res.status(400).json({error:'Report dates must use YYYY-MM-DD.'});return null;}
+  if(from&&to&&from>to){res.status(400).json({error:'Report start date must not be after end date.'});return null;}
+  return {from,to};
+}
+operationsRouter.get('/reports/:report.csv',requirePermission('reports.export'),wrap(async(req,res)=>{
+  const name=String(req.params.report);if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
+  const dates=reportDateFilters(req,res);if(!dates)return;const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;const auth=authContext(req);
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to,academicTermId));
+  const keys=rows.length?Object.keys(rows[0]):['no_data'];
+  const quote=(v:unknown)=>{let value=String(v??'');if(/^[=+@]/.test(value)||/^-[A-Za-z]/.test(value))value="'"+value;return /[",\r\n]/.test(value)?'"'+value.replace(/"/g,'""')+'"':value;};
+  const csv=[keys.map(quote).join(','),...rows.map(row=>keys.map(k=>quote(row[k])).join(','))].join('\r\n');
+  res.setHeader('Content-Type','text/csv; charset=utf-8');res.setHeader('Content-Disposition',`attachment; filename="${name}-${todayIso()}.csv"`);res.status(200).send(csv);
+}));
+operationsRouter.get('/reports/:report.xlsx',requirePermission('reports.export'),wrap(async(req,res)=>{
+  const name=String(req.params.report);if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
+  const dates=reportDateFilters(req,res);if(!dates)return;const auth=authContext(req);
+  const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to,academicTermId));
+  const ExcelJS=await import('exceljs');const workbook=new ExcelJS.Workbook();const sheet=workbook.addWorksheet(name.slice(0,31));
+  const keys=rows.length?Object.keys(rows[0]):['no_data'];
+  sheet.columns=keys.map(key=>({header:labelsForReport(key),key,width:Math.min(32,Math.max(12,labelsForReport(key).length+4))}));
+  for(const row of rows)sheet.addRow(row);
+  sheet.getRow(1).font={bold:true,color:{argb:'FFFFFFFF'}};sheet.getRow(1).fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF174C3D'}};
+  sheet.views=[{state:'frozen',ySplit:1}];
+  const buffer=await workbook.xlsx.writeBuffer();
+  res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition',`attachment; filename="${name}-${todayIso()}.xlsx"`);res.status(200).send(Buffer.from(buffer));
+}));
+operationsRouter.get('/reports/:report.pdf',requirePermission('reports.export'),wrap(async(req,res)=>{
+  const name=String(req.params.report);if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
+  const dates=reportDateFilters(req,res);if(!dates)return;const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;const auth=authContext(req);
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to,academicTermId));
+  const PdfDocument=(await import('pdfkit')).default;const doc=new PdfDocument({size:'A4',layout:'landscape',margin:32,bufferPages:true});
+  res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename="${name}-${todayIso()}.pdf"`);
+  doc.pipe(res);doc.fontSize(18).fillColor('#174c3d').text('Precious SchoolBooks — '+name.replaceAll('-',' '));doc.moveDown(.4);
+  doc.fontSize(8).fillColor('#64766a').text('KES · Generated '+new Date().toISOString()+' · School '+auth.schoolName);doc.moveDown();
+  const keys=rows.length?Object.keys(rows[0]):['no_data'];const widths=keys.map(()=>Math.max(50,(doc.page.width-64)/keys.length));
+  const renderRow=(values:unknown[],header=false)=>{const y=doc.y;let x=32;values.forEach((v,i)=>{const w=widths[i];if(header)doc.rect(x,y,w,20).fill('#e7f0ea');doc.fillColor(header?'#174c3d':'#344d40').fontSize(header?7:6).text(String(v??'').slice(0,120),x+3,y+4,{width:w-6,height:18,ellipsis:true});x+=w;});doc.y=y+20;};
+  renderRow(keys.map(labelsForReport),true);for(const row of rows){if(doc.y>doc.page.height-45){doc.addPage();renderRow(keys.map(labelsForReport),true);}renderRow(keys.map(k=>row[k]));}
+  doc.end();
+}));
+function labelsForReport(key:string):string{return key.replaceAll('_',' ');}
+
+operationsRouter.get('/reports/:report',requirePermission('reports.read'),wrap(async(req,res)=>{
+  const name=String(req.params.report);
+  if(!reportNames.includes(name)){res.status(404).json({error:'Report not found.'});return;}
+  const dates=reportDateFilters(req,res);if(!dates)return;const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;
+  const auth=authContext(req);
+  const rows=await withSchoolTransaction(auth.schoolId,c=>buildReportRows(c,auth.schoolId,name,dates.from,dates.to,academicTermId));
+  res.json({report:name,currency:'KES',from:dates.from,to:dates.to,rows});
+}));
+ THEN substring(${column} from $3)::bigint END),0)+1 AS next FROM ${table} WHERE school_id=$1 AND ${column} LIKE $2`,[schoolId,base+'%',base.length+1]);return base+String(result.rows[0].next).padStart(6,'0');}
 
 
 operationsRouter.get('/budgets',requirePermission('reports.read'),wrap(async(req,res)=>{
