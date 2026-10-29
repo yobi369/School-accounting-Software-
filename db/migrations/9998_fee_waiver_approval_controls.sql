@@ -20,3 +20,6 @@ END $$;
 ALTER TABLE fee_waivers
   ADD CONSTRAINT fee_waivers_status_review_check
   CHECK (status IN ('submitted', 'posted', 'rejected', 'reversed'));
+
+ALTER TABLE fee_receipts ADD COLUMN IF NOT EXISTS previous_balance numeric(14,2);
+ALTER TABLE fee_receipts ADD COLUMN IF NOT EXISTS new_balance numeric(14,2);
