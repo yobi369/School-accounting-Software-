@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - feature/precious-schoolbooks-fees-receipts-review
+      - feature/precious-schoolbooks-fees-receipts-final
 
 permissions:
   contents: read
@@ -39,9 +40,8 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: npm
       - name: Install dependencies
-        run: npm ci
+        run: npm install
       - name: Create least-privilege runtime role
         run: psql "$MIGRATIONS_DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE shuleledger_app LOGIN PASSWORD 'app-password' NOSUPERUSER NOBYPASSRLS;"
       - name: Apply database migrations
