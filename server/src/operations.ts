@@ -384,7 +384,7 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
         const saved=existing.rows[0].response_body as {receipt:Record<string,unknown>};
         return {receipt:saved.receipt,duplicate:true};
       }
-      const student=await c.query("SELECT id FROM students WHERE school_id=$1 AND id=$2 AND status='active'",[auth.schoolId,d.studentId]);
+      const student=await c.query("SELECT id,full_name,admission_number,class_name FROM students WHERE school_id=$1 AND id=$2 AND status='active'",[auth.schoolId,d.studentId]);
       if(!student.rowCount)throw Object.assign(new Error('Active student not found in this school.'),{statusCode:422});
       const cashAccount=await c.query("SELECT id,code,name,account_type,is_active FROM accounts WHERE school_id=$1 AND id=$2",[auth.schoolId,d.paymentAccountId]);
       if(!cashAccount.rowCount||cashAccount.rows[0].account_type!=='asset'||!cashAccount.rows[0].is_active)throw Object.assign(new Error('Select an active cash, bank, or M-Pesa asset account.'),{statusCode:422});
