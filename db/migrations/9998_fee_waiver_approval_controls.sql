@@ -7,7 +7,7 @@ ALTER TABLE fee_waivers ALTER COLUMN status DROP DEFAULT;
 ALTER TABLE fee_waivers ALTER COLUMN status TYPE text USING status::text;
 ALTER TABLE fee_waivers ALTER COLUMN status SET DEFAULT 'submitted';
 
-DO $
+DO $$
 DECLARE item record;
 BEGIN
   FOR item IN
