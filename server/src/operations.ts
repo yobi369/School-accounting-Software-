@@ -304,7 +304,7 @@ operationsRouter.post('/fees/invoices',requirePermission('fees.manage'),wrap(asy
   if(d.dueOn<issuedOn){res.status(422).json({error:'Due date cannot be before issue date.'});return;}
   try {
     const invoice=await withSchoolTransaction(auth.schoolId,async c=>{
-      const student=await c.query("SELECT id FROM students WHERE school_id=$1 AND id=$2 AND status='active'",[auth.schoolId,d.studentId]);
+      const student=await c.query("SELECT id,admission_number,full_name,class_name FROM students WHERE school_id=$1 AND id=$2 AND status='active'",[auth.schoolId,d.studentId]);
       if(!student.rowCount) throw Object.assign(new Error('Active student not found in this school.'),{statusCode:422});
       const id=randomUUID();const invoiceNumber=d.invoiceNumber??await nextFeeDocumentNumber(c,auth.schoolId,'INV',issuedOn);
       await c.query(
@@ -325,18 +325,20 @@ operationsRouter.post('/fees/invoices',requirePermission('fees.manage'),wrap(asy
 operationsRouter.get('/fees/receipts',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
-    `SELECT r.id,r.receipt_number,r.student_id,s.admission_number,s.full_name AS student_name,
-      r.received_on,r.amount::text,r.payment_method,r.external_reference,r.notes,r.status,
-      r.journal_entry_id,r.received_by,r.created_at,
-      COALESCE(json_agg(json_build_object('invoiceNumber',i.invoice_number,'amount',a.amount::text))
+    `SELECT r.id,r.receipt_number,r.student_id,s.admission_number,s.full_name AS student_name,s.class_name,
+      r.received_on,r.amount::text,r.previous_balance::text,r.new_balance::text,r.payment_method,r.external_reference,r.notes,r.status,
+      r.journal_entry_id,r.received_by,u.full_name AS received_by_name,r.created_at,$2::text AS school_name,
+      COALESCE(json_agg(json_build_object('invoiceNumber',i.invoice_number,'academicYear',i.academic_year,'termName',COALESCE(fs.term_name,i.academic_year),'amount',a.amount::text))
         FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS allocations
      FROM fee_receipts r
      JOIN students s ON s.id=r.student_id AND s.school_id=r.school_id
+     LEFT JOIN users u ON u.id=r.received_by
      LEFT JOIN fee_receipt_allocations a ON a.school_id=r.school_id AND a.receipt_id=r.id
      LEFT JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+     LEFT JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
      WHERE r.school_id=$1
-     GROUP BY r.id,s.admission_number,s.full_name
-     ORDER BY r.received_on DESC,r.created_at DESC LIMIT 500`,[auth.schoolId]));
+     GROUP BY r.id,s.admission_number,s.full_name,s.class_name,u.full_name
+     ORDER BY r.received_on DESC,r.created_at DESC LIMIT 500`,[auth.schoolId,auth.schoolName]));
   res.json({receipts:result.rows});
 }));
 
@@ -372,10 +374,12 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
       if(d.paymentMethod==='mpesa'&&!(accountName.includes('mpesa')||accountName.includes('m-pesa')||accountName.includes('mobile money')||accountCode.includes('mpesa')))throw Object.assign(new Error('M-Pesa payments must be posted to an M-Pesa / mobile-money ledger account.'),{statusCode:422});
       if(d.paymentMethod==='bank'){const mapped=await c.query('SELECT id FROM bank_accounts WHERE school_id=$1 AND ledger_account_id=$2 AND is_active=true LIMIT 1',[auth.schoolId,d.paymentAccountId]);if(!mapped.rowCount)throw Object.assign(new Error('Bank payments must use a ledger account mapped to an active Bank Account under Cash & Bank settings.'),{statusCode:422});}
       if(d.paymentMethod==='mpesa'&&d.externalReference?.trim()){await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`mpesa-reference:${auth.schoolId}:${d.externalReference.trim().toLowerCase()}`]);const duplicate=await c.query("SELECT id FROM fee_receipts WHERE school_id=$1 AND payment_method='mpesa' AND lower(external_reference)=lower($2) AND status='posted' LIMIT 1",[auth.schoolId,d.externalReference.trim()]);if(duplicate.rowCount)throw Object.assign(new Error('This M-Pesa transaction reference has already been recorded.'),{statusCode:409});}
+      await c.query("SELECT id FROM fee_invoices WHERE school_id=$1 AND student_id=$2 AND status NOT IN ('void','reversed') ORDER BY id FOR UPDATE",[auth.schoolId,d.studentId]);
+      const previous=await c.query(`SELECT COALESCE(sum(i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)),0)::numeric(14,2)::text AS balance FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status NOT IN ('void','reversed')`,[auth.schoolId,d.studentId]);const previousBalance=String(previous.rows[0].balance??'0.00');
       const receiptId=randomUUID();const receiptNumber=d.receiptNumber??await nextFeeDocumentNumber(c,auth.schoolId,'RCT',receivedOn);
       await c.query(
-        "INSERT INTO fee_receipts (id,school_id,receipt_number,student_id,received_on,amount,payment_method,external_reference,notes,received_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-        [receiptId,auth.schoolId,receiptNumber,d.studentId,receivedOn,amountString(amount),d.paymentMethod,d.externalReference??null,d.notes??null,auth.userId]);
+        "INSERT INTO fee_receipts (id,school_id,receipt_number,student_id,received_on,amount,payment_method,external_reference,notes,received_by,previous_balance,new_balance) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULL)",
+        [receiptId,auth.schoolId,receiptNumber,d.studentId,receivedOn,amountString(amount),d.paymentMethod,d.externalReference??null,d.notes??null,auth.userId,previousBalance]);
       for(const allocation of d.allocations){
         const allocated=parseKesToMinorUnits(allocation.amount);
         if(allocated<=0n)throw Object.assign(new Error('Each allocation must be greater than zero.'),{statusCode:422});
@@ -401,8 +405,9 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
           ELSE 'issued' END
          WHERE i.school_id=$1 AND i.id=ANY($2::uuid[])`,
         [auth.schoolId,d.allocations.map(a=>a.invoiceId)]);
-      await audit(c,auth.schoolId,auth.userId,'fee.receipt.post','fee_receipt',receiptId,{receiptNumber,journalEntryId:journal.id,amount:amountString(amount)});
-      const receipt={id:receiptId,receiptNumber,studentId:d.studentId,receivedOn,amount:amountString(amount),paymentMethod:d.paymentMethod,status:'posted',journalEntryId:journal.id};
+      const newBalanceResult=await c.query(`SELECT COALESCE(sum(i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)),0)::numeric(14,2)::text AS balance FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status NOT IN ('void','reversed')`,[auth.schoolId,d.studentId]);const newBalance=String(newBalanceResult.rows[0].balance??'0.00');await c.query('UPDATE fee_receipts SET new_balance=$3 WHERE school_id=$1 AND id=$2',[auth.schoolId,receiptId,newBalance]);
+      await audit(c,auth.schoolId,auth.userId,'fee.receipt.post','fee_receipt',receiptId,{receiptNumber,journalEntryId:journal.id,amount:amountString(amount),previousBalance,newBalance});
+      const receipt={id:receiptId,receiptNumber,studentId:d.studentId,studentName:student.rows[0].full_name,admissionNumber:student.rows[0].admission_number,className:student.rows[0].class_name,schoolName:auth.schoolName,receivedOn,amount:amountString(amount),previousBalance,newBalance,paymentMethod:d.paymentMethod,externalReference:d.externalReference??null,status:'posted',journalEntryId:journal.id};
       await c.query('INSERT INTO idempotency_records (school_id,idempotency_key,request_hash,response_status,response_body,resource_type,resource_id) VALUES ($1,$2,$3,201,$4::jsonb,\'fee_receipt\',$5)',[auth.schoolId,idempotencyKey,requestHash,JSON.stringify({receipt}),receiptId]);
       return {receipt,duplicate:false};
     });
