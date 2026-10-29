@@ -35,3 +35,15 @@ CROSS JOIN (VALUES ('Tuition'),('Meals'),('Transport'),('Activities'),('Boarding
 ON CONFLICT (school_id, name) DO NOTHING;
 
 ALTER TABLE fee_structures ADD COLUMN IF NOT EXISTS version integer NOT NULL DEFAULT 1 CHECK (version > 0);
+
+ALTER TABLE school_classes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE school_classes FORCE ROW LEVEL SECURITY;
+CREATE POLICY school_classes_school_isolation ON school_classes
+  USING (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid)
+  WITH CHECK (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid);
+ALTER TABLE school_fee_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE school_fee_items FORCE ROW LEVEL SECURITY;
+CREATE POLICY school_fee_items_school_isolation ON school_fee_items
+  USING (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid)
+  WITH CHECK (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid);
+GRANT SELECT, INSERT, UPDATE, DELETE ON school_classes, school_fee_items TO shuleledger_app;
