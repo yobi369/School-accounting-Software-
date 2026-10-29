@@ -47,7 +47,8 @@ describe('fee receipt input validation', () => {
     }).success).toBe(false);
     expect(receiptSchema.safeParse({ ...validReceipt, amount: '-1.00' }).success).toBe(false);
     expect(receiptSchema.safeParse({ ...validReceipt, amount: '1.001' }).success).toBe(false);
-    // Zero is syntactically valid money; the receipt endpoint separately rejects amount <= 0.\n    expect(receiptSchema.safeParse({ ...validReceipt, amount: '0.00' }).success).toBe(true);
+    // Zero is syntactically valid money; the receipt endpoint separately rejects amount <= 0.
+    expect(receiptSchema.safeParse({ ...validReceipt, amount: '0.00' }).success).toBe(true);
   });
 
   it('defaults allocations to an empty list and student credit to false', () => {
