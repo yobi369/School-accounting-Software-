@@ -33,3 +33,5 @@ SELECT gen_random_uuid(), schools.school_id, items.name, 0, true, now()
 FROM (SELECT DISTINCT school_id FROM students) AS schools
 CROSS JOIN (VALUES ('Tuition'),('Meals'),('Transport'),('Activities'),('Boarding'),('Examination'),('Development Levy'),('Other')) AS items(name)
 ON CONFLICT (school_id, name) DO NOTHING;
+
+ALTER TABLE fee_structures ADD COLUMN IF NOT EXISTS version integer NOT NULL DEFAULT 1 CHECK (version > 0);
