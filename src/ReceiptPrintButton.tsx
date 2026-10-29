@@ -16,6 +16,7 @@ export type ReceiptRow = {
   previous_balance?: string | number | null;
   new_balance?: string | number | null;
   received_by_name?: string | null;
+  created_at?: string | null;
   student_credit_amount?: string | number | null;
   allocations?: ReceiptAllocation[] | string;
 };
@@ -68,7 +69,7 @@ export function ReceiptPrintButton({ receipt }: { receipt: ReceiptRow }): ReactE
       `<tr><td>${escapeHtml(item.invoiceNumber || 'Fee invoice')}<br><small>${escapeHtml([item.academicYear,item.termName].filter(Boolean).join(' · '))}</small></td><td class="right">${escapeHtml(kes(item.amount))}</td></tr>`
     ).join('');
     const firstAllocation = allocations[0];
-    const receivedDate = receipt.received_on ? new Intl.DateTimeFormat('en-KE',{day:'2-digit',month:'short',year:'numeric'}).format(new Date(receipt.received_on)) : '—';
+    const receivedDate = receipt.created_at ? new Intl.DateTimeFormat('en-KE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',hour12:true,timeZone:'Africa/Nairobi'}).format(new Date(receipt.created_at)) : receipt.received_on ? new Intl.DateTimeFormat('en-KE',{day:'2-digit',month:'short',year:'numeric'}).format(new Date(receipt.received_on)) : '—';
     const status = String(receipt.status ?? '').toLowerCase();
     const reversed = status === 'reversed';
     const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -106,7 +107,7 @@ export function ReceiptPrintButton({ receipt }: { receipt: ReceiptRow }): ReactE
       </tbody></table>
       <p><strong>Amount in words:</strong> ${escapeHtml(amountInWords(receipt.amount))}</p>
       <div class="total">Amount paid: ${escapeHtml(kes(receipt.amount))}</div>
-      ${Number(receipt.student_credit_amount ?? 0) > 0 ? '<p><strong>Unallocated student credit created:</strong> ' + escapeHtml(kes(receipt.student_credit_amount)) + '</p>' : ''}
+      ${Number(receipt.student_credit_amount ?? 0) > 0 && status !== 'reversed' ? '<p><strong>Unallocated student credit created:</strong> ' + escapeHtml(kes(receipt.student_credit_amount)) + '</p>' : ''}
       <section class="details"><div><div class="label">Previous balance</div><div class="value">${escapeHtml(kes(receipt.previous_balance))}</div></div><div><div class="label">New balance</div><div class="value">${escapeHtml(kes(receipt.new_balance))}</div></div></section>
       ${receipt.notes ? '<p><strong>Notes:</strong> ' + escapeHtml(receipt.notes) + '</p>' : ''}
       <footer>Generated from the Precious SchoolBooks receipt register. Keep this receipt for your records.<br>Use the browser print dialog to print or save as PDF.</footer>
