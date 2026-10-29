@@ -37,7 +37,7 @@ ALTER TABLE student_fee_credit_allocations FORCE ROW LEVEL SECURITY;
 CREATE POLICY student_fee_credit_allocations_school_isolation ON student_fee_credit_allocations
   USING (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid)
   WITH CHECK (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid);
-DO $
+DO $grant$
 BEGIN
   -- Render may apply migrations before start-render creates the runtime role.
   -- The startup role-setup step grants application privileges after migrations.
