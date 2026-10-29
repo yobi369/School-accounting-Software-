@@ -1103,6 +1103,7 @@ operationsRouter.get('/fees/statements/:studentId',requirePermission('fees.read'
      SELECT ca.reversed_at::date,'Credit allocation reversal',r.receipt_number,'Reversal of student credit allocation to invoice '||i.invoice_number,ca.amount::numeric(14,2),ca.amount::numeric(14,2),4
      FROM student_fee_credit_allocations ca JOIN student_fee_credits cr ON cr.school_id=ca.school_id AND cr.id=ca.credit_id JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id JOIN fee_invoices i ON i.school_id=ca.school_id AND i.id=ca.invoice_id
      WHERE ca.school_id=$1 AND cr.student_id=$2 AND ca.status='reversed'
+     UNION ALL
      SELECT rev.posting_date,'Reversal',r.receipt_number,'Reversal of student credit balance',cr.amount::numeric(14,2),0::numeric(14,2),4
      FROM student_fee_credits cr JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id
      JOIN journal_entries rev ON rev.school_id=r.school_id AND rev.reversal_of_id=r.journal_entry_id AND rev.status='posted'
