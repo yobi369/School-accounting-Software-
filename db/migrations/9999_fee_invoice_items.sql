@@ -11,3 +11,10 @@ CREATE TABLE IF NOT EXISTS fee_invoice_items (
 );
 CREATE INDEX IF NOT EXISTS fee_invoice_items_school_invoice_idx
   ON fee_invoice_items (school_id, invoice_id, line_number);
+
+ALTER TABLE fee_invoice_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE fee_invoice_items FORCE ROW LEVEL SECURITY;
+CREATE POLICY fee_invoice_items_school_isolation ON fee_invoice_items
+  USING (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid)
+  WITH CHECK (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid);
+GRANT SELECT, INSERT, UPDATE, DELETE ON fee_invoice_items TO shuleledger_app;
