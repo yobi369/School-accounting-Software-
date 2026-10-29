@@ -124,7 +124,7 @@ operationsRouter.get('/students/:studentId/financial-account',requirePermission(
         SELECT i.id AS transaction_id,i.issued_on::date AS transaction_date,i.invoice_number AS reference,
           COALESCE(i.description,'School fees') AS description,'invoice'::text AS transaction_type,
           i.amount::numeric(14,2) AS debit,0::numeric(14,2) AS credit,1 AS sort_order
-        FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status<>'void' AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$3::uuid))
+        FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status NOT IN ('void','reversed') AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$3::uuid))
         UNION ALL
         SELECT r.id,r.received_on::date,r.receipt_number,
           COALESCE(r.notes,'Fee payment · '||r.payment_method),'receipt'::text,
@@ -148,7 +148,7 @@ operationsRouter.get('/students/:studentId/financial-account',requirePermission(
         COALESCE(sum(credit),0)::numeric(14,2)::text AS credits,
         COALESCE(sum(debit-credit),0)::numeric(14,2)::text AS balance
        FROM (
-         SELECT i.amount::numeric AS debit,0::numeric AS credit FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status<>'void' AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$3::uuid))
+         SELECT i.amount::numeric AS debit,0::numeric AS credit FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status NOT IN ('void','reversed') AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$3::uuid))
          UNION ALL SELECT 0::numeric,CASE WHEN $3::uuid IS NULL THEN r.amount::numeric ELSE COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND i.student_id=r.student_id AND fs.academic_term_id=$3::uuid),0)::numeric END FROM fee_receipts r WHERE r.school_id=$1 AND r.student_id=$2 AND r.status='posted' AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_receipt_allocations a JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=r.school_id AND a.receipt_id=r.id AND i.student_id=r.student_id AND fs.academic_term_id=$3::uuid))
          UNION ALL SELECT 0::numeric,w.amount::numeric FROM fee_waivers w JOIN fee_invoices i ON i.id=w.invoice_id AND i.school_id=w.school_id WHERE w.school_id=$1 AND i.student_id=$2 AND w.status='posted' AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$3::uuid))
        ) t`,[auth.schoolId,studentId,academicTermId]);
@@ -177,12 +177,12 @@ const feeStructureSchema=z.object({
   termName:z.string().trim().min(1).max(40),
   academicTermId:z.string().uuid().optional(),
   dueOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  items:z.array(z.object({itemName:z.string().trim().min(1).max(100),amount:z.string().regex(/^\\d+(?:\\.\\d{1,2})?$/)})).min(1).max(100),
+  items:z.array(z.object({itemName:z.string().trim().min(1).max(100),amount:z.string().regex(/^\d+(?:\.\d{1,2})?$/)})).min(1).max(100),
 });
 operationsRouter.get('/fees/structures',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
-    "SELECT f.id,f.class_name,f.academic_year,f.term_name,f.academic_term_id,f.due_on,f.status,f.created_at,COALESCE(json_agg(json_build_object('id',i.id,'itemName',i.item_name,'amount',i.amount::text)) FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS items,COALESCE((SELECT count(*)::int FROM fee_invoices inv WHERE inv.school_id=f.school_id AND inv.fee_structure_id=f.id),0) AS invoices_created FROM fee_structures f LEFT JOIN fee_structure_items i ON i.school_id=f.school_id AND i.structure_id=f.id WHERE f.school_id=$1 GROUP BY f.id ORDER BY f.academic_year DESC,f.term_name,f.class_name",
+    "SELECT f.id,f.class_name,f.academic_year,f.term_name,f.academic_term_id,f.version,f.due_on,f.status,f.created_at,COALESCE(json_agg(json_build_object('id',i.id,'itemName',i.item_name,'amount',i.amount::text)) FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS items,COALESCE((SELECT count(*)::int FROM fee_invoices inv WHERE inv.school_id=f.school_id AND inv.fee_structure_id=f.id),0) AS invoices_created,COALESCE((SELECT sum(fi.amount) FROM fee_structure_items fi WHERE fi.school_id=f.school_id AND fi.structure_id=f.id),0)::numeric(14,2)::text AS total_fees,(SELECT count(*)::int FROM students st WHERE st.school_id=f.school_id AND st.class_name=f.class_name AND st.status='active') AS eligible_students FROM fee_structures f LEFT JOIN fee_structure_items i ON i.school_id=f.school_id AND i.structure_id=f.id WHERE f.school_id=$1 GROUP BY f.id ORDER BY f.academic_year DESC,f.term_name,f.class_name",
     [auth.schoolId]));
   res.json({structures:result.rows});
 }));
@@ -195,6 +195,7 @@ operationsRouter.post('/fees/structures',requirePermission('fees.manage'),wrap(a
   if(new Set(items.map(item=>item.itemName.toLowerCase())).size!==items.length){res.status(422).json({error:'Fee item names must be unique within a structure.'});return;}
   try{
     const structure=await withSchoolTransaction(auth.schoolId,async c=>{
+      const configuredClass=await c.query('SELECT id FROM school_classes WHERE school_id=$1 AND name=$2 AND is_active=true',[auth.schoolId,d.className]);if(!configuredClass.rowCount)throw Object.assign(new Error('Choose a class or stream configured under School Settings.'),{statusCode:422});
       const id=randomUUID();
       let academicYear=d.academicYear;
       let termName=d.termName;
@@ -210,13 +211,27 @@ operationsRouter.post('/fees/structures',requirePermission('fees.manage'),wrap(a
         if(d.dueOn<start||d.dueOn>end)throw Object.assign(new Error('The fee due date must fall within the selected academic term.'),{statusCode:422});
         academicYear=String(t.year_name);termName=String(t.term_name);
       }
-      await c.query("INSERT INTO fee_structures (id,school_id,class_name,academic_year,term_name,academic_term_id,due_on,status,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8)",[id,auth.schoolId,d.className,academicYear,termName,d.academicTermId??null,d.dueOn,auth.userId]);
+      await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`fee-structure-version:${auth.schoolId}:${d.className}:${d.academicTermId??'legacy'}`]);const versionResult=await c.query('SELECT COALESCE(MAX(version),0)+1 AS version FROM fee_structures WHERE school_id=$1 AND class_name=$2 AND academic_term_id IS NOT DISTINCT FROM $3',[auth.schoolId,d.className,d.academicTermId??null]);const version=Number(versionResult.rows[0].version);
+      await c.query("INSERT INTO fee_structures (id,school_id,class_name,academic_year,term_name,academic_term_id,version,due_on,status,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'draft',$9)",[id,auth.schoolId,d.className,academicYear,termName,d.academicTermId??null,version,d.dueOn,auth.userId]);
       for(const item of items)await c.query("INSERT INTO fee_structure_items (id,school_id,structure_id,item_name,amount) VALUES ($1,$2,$3,$4,$5)",[randomUUID(),auth.schoolId,id,item.itemName,amountString(item.minor)]);
       await audit(c,auth.schoolId,auth.userId,'fee.structure.create','fee_structure',id,{className:d.className,academicYear,termName,academicTermId:d.academicTermId??null,itemCount:items.length});
-      return {id,className:d.className,academicYear,termName,academicTermId:d.academicTermId??null,dueOn:d.dueOn,status:'draft',items:items.map(item=>({itemName:item.itemName,amount:amountString(item.minor)}))};
+      return {id,className:d.className,academicYear,termName,academicTermId:d.academicTermId??null,version,dueOn:d.dueOn,status:'draft',items:items.map(item=>({itemName:item.itemName,amount:amountString(item.minor)}))};
     });
     res.status(201).json({structure});
   }catch(error){if(!handleError(res,error))throw error;}
+}));
+operationsRouter.put('/fees/structures/:id',requirePermission('fees.manage'),wrap(async(req,res)=>{
+ const id=z.string().uuid().safeParse(req.params.id);const parsed=feeStructureSchema.safeParse(req.body);if(!id.success||!parsed.success){res.status(400).json({error:'Invalid fee structure update.'});return;}
+ const auth=authContext(req);const d=parsed.data;const items=d.items.map(item=>({itemName:item.itemName,minor:parseKesToMinorUnits(item.amount)}));
+ if(items.some(item=>item.minor<=0n)||new Set(items.map(item=>item.itemName.toLowerCase())).size!==items.length){res.status(422).json({error:'Fee items must have unique names and positive amounts.'});return;}
+ try{const structure=await withSchoolTransaction(auth.schoolId,async client=>{
+  const found=await client.query('SELECT id,status FROM fee_structures WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,id.data]);if(!found.rowCount)throw Object.assign(new Error('Fee structure not found.'),{statusCode:404});if(found.rows[0].status!=='draft')throw Object.assign(new Error('Only draft fee structures can be edited. Activated structures must be adjusted by creating a new version.'),{statusCode:409});
+  const used=await client.query('SELECT count(*)::int AS count FROM fee_invoices WHERE school_id=$1 AND fee_structure_id=$2',[auth.schoolId,id.data]);if(Number(used.rows[0].count)>0)throw Object.assign(new Error('This fee structure has already generated invoices and cannot be edited.'),{statusCode:409});
+  const configuredClass=await client.query('SELECT id FROM school_classes WHERE school_id=$1 AND name=$2 AND is_active=true',[auth.schoolId,d.className]);if(!configuredClass.rowCount)throw Object.assign(new Error('Choose a class configured under School Settings.'),{statusCode:422});
+  let academicYear=d.academicYear;let termName=d.termName;
+  if(d.academicTermId){const term=await client.query("SELECT t.name AS term_name,t.starts_on,t.ends_on,t.status AS term_status,y.name AS year_name,y.status AS year_status FROM academic_terms t JOIN academic_years y ON y.school_id=t.school_id AND y.id=t.academic_year_id WHERE t.school_id=$1 AND t.id=$2",[auth.schoolId,d.academicTermId]);if(!term.rowCount||term.rows[0].term_status!=='open'||term.rows[0].year_status!=='open')throw Object.assign(new Error('Choose an open academic year and term.'),{statusCode:409});const t=term.rows[0];if(d.dueOn<String(t.starts_on).slice(0,10)||d.dueOn>String(t.ends_on).slice(0,10))throw Object.assign(new Error('The due date must fall within the selected academic term.'),{statusCode:422});academicYear=String(t.year_name);termName=String(t.term_name);}
+  await client.query('UPDATE fee_structures SET class_name=$3,academic_year=$4,term_name=$5,academic_term_id=$6,due_on=$7 WHERE school_id=$1 AND id=$2',[auth.schoolId,id.data,d.className,academicYear,termName,d.academicTermId??null,d.dueOn]);await client.query('DELETE FROM fee_structure_items WHERE school_id=$1 AND structure_id=$2',[auth.schoolId,id.data]);for(const item of items)await client.query('INSERT INTO fee_structure_items (id,school_id,structure_id,item_name,amount) VALUES ($1,$2,$3,$4,$5)',[randomUUID(),auth.schoolId,id.data,item.itemName,amountString(item.minor)]);await audit(client,auth.schoolId,auth.userId,'fee.structure.update','fee_structure',id.data,{className:d.className,academicYear,termName,itemCount:items.length});return {id:id.data,className:d.className,academicYear,termName,academicTermId:d.academicTermId??null,dueOn:d.dueOn,status:'draft',items:items.map(item=>({itemName:item.itemName,amount:amountString(item.minor)}))};
+ });res.json({structure});}catch(error){if(!handleError(res,error))throw error;}
 }));
 operationsRouter.post('/fees/structures/:id/activate',requirePermission('fees.manage'),wrap(async(req,res)=>{
   const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid fee structure ID.'});return;}
@@ -255,12 +270,13 @@ operationsRouter.post('/fees/structures/:id/invoice-class',requirePermission('fe
       if(!students.rowCount)throw Object.assign(new Error('No active students found in the selected class.'),{statusCode:422});
       const created=[];const skipped=[];
       for(const student of students.rows){
-        const existing=await c.query("SELECT id,invoice_number FROM fee_invoices WHERE school_id=$1 AND student_id=$2 AND fee_structure_id=$3",[auth.schoolId,student.id,id.data]);
+        const existing=await c.query("SELECT i.id,i.invoice_number FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND (i.fee_structure_id=$3 OR ($5::uuid IS NOT NULL AND EXISTS (SELECT 1 FROM fee_structures prior WHERE prior.school_id=i.school_id AND prior.id=i.fee_structure_id AND prior.class_name=$4 AND prior.academic_term_id=$5)))",[auth.schoolId,student.id,id.data,f.class_name,f.academic_term_id]);
         if(existing.rowCount){skipped.push({studentId:student.id,invoiceNumber:existing.rows[0].invoice_number});continue;}
         const invoiceId=randomUUID();
-        const invoiceNumber='FS-'+id.data.replace(/-/g,'').slice(0,10).toUpperCase()+'-'+String(student.id).replace(/-/g,'').slice(0,10).toUpperCase();
+        const invoiceSequenceDate=/^\d{4}/.test(String(f.academic_year))?String(f.academic_year).slice(0,4)+'-01-01':issuedOn;const invoiceNumber=await nextFeeDocumentNumber(c,auth.schoolId,'INV',invoiceSequenceDate);
         const description=items.rows.map(item=>String(item.item_name)).join(', ');
         await c.query("INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,issued_on,due_on,amount,status,created_by,fee_structure_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'issued',$10,$11)",[invoiceId,auth.schoolId,student.id,invoiceNumber,f.academic_year,description,issuedOn,f.due_on,amountString(total),auth.userId,id.data]);
+        for(let itemIndex=0;itemIndex<items.rows.length;itemIndex++){const item=items.rows[itemIndex];await c.query('INSERT INTO fee_invoice_items (id,school_id,invoice_id,line_number,item_name,description,amount) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),auth.schoolId,invoiceId,itemIndex+1,String(item.item_name),'',String(item.amount)]);}
         const journal=await postJournal(c,auth.schoolId,auth.userId,issuedOn,'Bulk fee invoice '+invoiceNumber+': '+description,'fee_invoice',invoiceId,[
           {accountCode:'1200',debit:amountString(total),credit:'0.00'},
           {accountCode:'4000',debit:'0.00',credit:amountString(total)},
@@ -269,48 +285,55 @@ operationsRouter.post('/fees/structures/:id/invoice-class',requirePermission('fe
         created.push({studentId:student.id,invoiceNumber,amount:amountString(total),journalEntryId:journal.id});
       }
       await audit(c,auth.schoolId,auth.userId,'fee.structure.bulk_invoice','fee_structure',id.data,{createdCount:created.length,skippedCount:skipped.length,academicYear:f.academic_year,termName:f.term_name});
-      return {structureId:id.data,created,skipped,createdCount:created.length,skippedCount:skipped.length,totalPerInvoice:amountString(total)};
+      return {structureId:id.data,created,skipped,createdCount:created.length,skippedCount:skipped.length,eligibleStudentCount:students.rowCount,totalPerInvoice:amountString(total),expectedTotal:amountString(total*BigInt(students.rowCount))};
     });
     res.status(200).json(outcome);
   }catch(error){if(!handleError(res,error))throw error;}
 }));
 
 const invoiceSchema=z.object({
-  studentId:z.string().uuid(), invoiceNumber:z.string().trim().min(1).max(60),
-  academicYear:z.string().trim().min(2).max(30), description:z.string().trim().min(2).max(500),
+  studentId:z.string().uuid(), invoiceNumber:z.string().trim().min(1).max(60).optional(),
+  academicYear:z.string().trim().min(2).max(30), description:z.string().trim().min(2).max(500).optional(),
   issuedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  dueOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/), amount:z.string(),
+  dueOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/), amount:z.string().optional(),
+  items:z.array(z.object({itemName:z.string().trim().min(1).max(120),description:z.string().trim().max(500).optional(),amount:z.string().regex(/^\d+(?:\.\d{1,2})?$/)})).min(1).max(100).optional(),
 });
 operationsRouter.get('/fees/invoices',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
-    `SELECT i.id,i.invoice_number,i.student_id,s.admission_number,s.full_name AS student_name,
-      i.academic_year,i.description,i.issued_on,i.due_on,i.amount::text,i.status,
+    `SELECT i.id,i.invoice_number,i.student_id,s.admission_number,s.full_name AS student_name,s.class_name,
+      i.academic_year,i.description,i.issued_on,i.due_on,i.amount::text,i.status,fs.academic_term_id,COALESCE(fs.term_name,i.academic_year) AS term_name,
+      COALESCE((SELECT json_agg(json_build_object('itemName',ii.item_name,'description',ii.description,'amount',ii.amount::text) ORDER BY ii.line_number) FROM fee_invoice_items ii WHERE ii.school_id=i.school_id AND ii.invoice_id=i.id),'[]'::json) AS items,
       COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
-      (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
-     FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
-     WHERE i.school_id=$1 AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$2::uuid)) ORDER BY i.issued_on DESC,i.invoice_number DESC LIMIT 500`,[auth.schoolId,academicTermId]));
+      COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
+      COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0)::text AS credited,
+      (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)-COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0))::numeric(14,2)::text AS outstanding
+     FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id LEFT JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
+     WHERE i.school_id=$1 AND ($2::uuid IS NULL OR fs.academic_term_id=$2::uuid) ORDER BY i.issued_on DESC,i.invoice_number DESC LIMIT 500`,[auth.schoolId,academicTermId]));
   res.json({invoices:result.rows});
 }));
 operationsRouter.post('/fees/invoices',requirePermission('fees.manage'),wrap(async(req,res)=>{
   const parsed=invoiceSchema.safeParse(req.body); if(!parsed.success){res.status(400).json({error:'Invalid invoice details.',details:parsed.error.flatten()});return;}
-  const d=parsed.data; const auth=authContext(req); const issuedOn=d.issuedOn??new Date().toISOString().slice(0,10);
-  const minor=parseKesToMinorUnits(d.amount); if(minor<=0n){res.status(422).json({error:'Invoice amount must be greater than zero.'});return;}
+  const d=parsed.data; const auth=authContext(req); const issuedOn=d.issuedOn??todayIso();
+  const lineItems=(d.items??(d.amount&&d.description?[{itemName:d.description,description:d.description,amount:d.amount}]:[])).map(item=>({itemName:item.itemName,description:item.description??'',minor:parseKesToMinorUnits(item.amount)}));
+  if(!lineItems.length||lineItems.some(item=>item.minor<=0n)){res.status(422).json({error:'Provide at least one invoice line item with a positive amount.'});return;}
+  const minor=lineItems.reduce((sum,item)=>sum+item.minor,0n);const description=(d.description??lineItems.map(item=>item.itemName).join(', ')).trim();
   if(d.dueOn<issuedOn){res.status(422).json({error:'Due date cannot be before issue date.'});return;}
   try {
     const invoice=await withSchoolTransaction(auth.schoolId,async c=>{
-      const student=await c.query("SELECT id FROM students WHERE school_id=$1 AND id=$2 AND status='active'",[auth.schoolId,d.studentId]);
+      const student=await c.query("SELECT id,admission_number,full_name,class_name FROM students WHERE school_id=$1 AND id=$2 AND status='active'",[auth.schoolId,d.studentId]);
       if(!student.rowCount) throw Object.assign(new Error('Active student not found in this school.'),{statusCode:422});
-      const id=randomUUID();
+      const id=randomUUID();const invoiceSequenceDate=/^\d{4}/.test(String(d.academicYear))?String(d.academicYear).slice(0,4)+'-01-01':issuedOn;const invoiceNumber=d.invoiceNumber??await nextFeeDocumentNumber(c,auth.schoolId,'INV',invoiceSequenceDate);
       await c.query(
         "INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,issued_on,due_on,amount,status,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'issued',$10)",
-        [id,auth.schoolId,d.studentId,d.invoiceNumber,d.academicYear,d.description,issuedOn,d.dueOn,amountString(minor),auth.userId]);
-      const journal=await postJournal(c,auth.schoolId,auth.userId,issuedOn,`Fee invoice ${d.invoiceNumber}: ${d.description}`,'fee_invoice',id,[
+        [id,auth.schoolId,d.studentId,invoiceNumber,d.academicYear,description,issuedOn,d.dueOn,amountString(minor),auth.userId]);
+      for(let index=0;index<lineItems.length;index++){const item=lineItems[index];await c.query('INSERT INTO fee_invoice_items (id,school_id,invoice_id,line_number,item_name,description,amount) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),auth.schoolId,id,index+1,item.itemName,item.description,amountString(item.minor)]);}
+      const journal=await postJournal(c,auth.schoolId,auth.userId,issuedOn,`Fee invoice ${invoiceNumber}: ${description}`,'fee_invoice',id,[
         {accountCode:'1200',debit:amountString(minor),credit:'0.00'},
         {accountCode:'4000',debit:'0.00',credit:amountString(minor)},
       ]);
-      await audit(c,auth.schoolId,auth.userId,'fee.invoice.issue','fee_invoice',id,{invoiceNumber:d.invoiceNumber,journalEntryId:journal.id,amount:amountString(minor)});
-      return {id,invoiceNumber:d.invoiceNumber,studentId:d.studentId,issuedOn,dueOn:d.dueOn,amount:amountString(minor),status:'issued',journalEntryId:journal.id};
+      await audit(c,auth.schoolId,auth.userId,'fee.invoice.issue','fee_invoice',id,{invoiceNumber,journalEntryId:journal.id,amount:amountString(minor),itemCount:lineItems.length});
+      return {id,invoiceNumber,studentId:d.studentId,issuedOn,dueOn:d.dueOn,amount:amountString(minor),items:lineItems.map(item=>({itemName:item.itemName,description:item.description,amount:amountString(item.minor)})),status:'issued',journalEntryId:journal.id};
     });
     res.status(201).json({invoice});
   } catch(error){if(!handleError(res,error))throw error;}
@@ -319,36 +342,40 @@ operationsRouter.post('/fees/invoices',requirePermission('fees.manage'),wrap(asy
 operationsRouter.get('/fees/receipts',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
-    `SELECT r.id,r.receipt_number,r.student_id,s.admission_number,s.full_name AS student_name,
-      r.received_on,r.amount::text,r.payment_method,r.external_reference,r.notes,r.status,
-      r.journal_entry_id,r.received_by,r.created_at,
-      COALESCE(json_agg(json_build_object('invoiceNumber',i.invoice_number,'amount',a.amount::text))
+    `SELECT r.id,r.receipt_number,r.student_id,s.admission_number,s.full_name AS student_name,s.class_name,
+      r.received_on,r.amount::text,r.previous_balance::text,r.new_balance::text,COALESCE((SELECT cr.amount::text FROM student_fee_credits cr WHERE cr.school_id=r.school_id AND cr.receipt_id=r.id),'0.00') AS student_credit_amount,r.payment_method,r.external_reference,r.notes,r.status,
+      r.journal_entry_id,r.received_by,u.full_name AS received_by_name,r.created_at,$2::text AS school_name,
+      COALESCE(json_agg(json_build_object('invoiceNumber',i.invoice_number,'academicYear',i.academic_year,'termName',COALESCE(fs.term_name,i.academic_year),'amount',a.amount::text))
         FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS allocations
      FROM fee_receipts r
      JOIN students s ON s.id=r.student_id AND s.school_id=r.school_id
+     LEFT JOIN users u ON u.id=r.received_by
      LEFT JOIN fee_receipt_allocations a ON a.school_id=r.school_id AND a.receipt_id=r.id
      LEFT JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+     LEFT JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
      WHERE r.school_id=$1
-     GROUP BY r.id,s.admission_number,s.full_name
-     ORDER BY r.received_on DESC,r.created_at DESC LIMIT 500`,[auth.schoolId]));
+     GROUP BY r.id,s.admission_number,s.full_name,s.class_name,u.full_name
+     ORDER BY r.received_on DESC,r.created_at DESC LIMIT 500`,[auth.schoolId,auth.schoolName]));
   res.json({receipts:result.rows});
 }));
 
 const receiptSchema=z.object({
-  studentId:z.string().uuid(),receiptNumber:z.string().trim().min(1).max(60),
+  studentId:z.string().uuid(),receiptNumber:z.string().trim().min(1).max(60).optional(),
   receivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  amount:z.string(),paymentAccountId:z.string().uuid(),paymentMethod:z.enum(['cash','bank','mpesa','cheque','other']),
+  amount:z.string().regex(/^\d+(?:\.\d{1,2})?$/),paymentAccountId:z.string().uuid(),paymentMethod:z.enum(['cash','bank','mpesa','cheque','other']),
   externalReference:z.string().trim().max(160).optional(),
   notes:z.string().trim().max(500).optional(),
-  allocations:z.array(z.object({invoiceId:z.string().uuid(),amount:z.string()})).min(1).max(100),
-});
+  allocations:z.array(z.object({invoiceId:z.string().uuid(),amount:z.string().regex(/^\d+(?:\.\d{1,2})?$/)})).max(100).default([]),
+  allowStudentCredit:z.boolean().optional().default(false),
+}).superRefine((data,ctx)=>{if((data.paymentMethod==='bank'||data.paymentMethod==='mpesa')&&!data.externalReference?.trim())ctx.addIssue({code:'custom',path:['externalReference'],message:'Payment reference is required for Bank and M-Pesa receipts.'});});
 operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap(async(req,res)=>{
   const parsed=receiptSchema.safeParse(req.body);if(!parsed.success){res.status(400).json({error:'Invalid receipt details.',details:parsed.error.flatten()});return;}
   const d=parsed.data;const auth=authContext(req);const receivedOn=d.receivedOn??new Date().toISOString().slice(0,10);
   const idempotencyKey=req.header('Idempotency-Key');if(!idempotencyKey||idempotencyKey.length<8||idempotencyKey.length>200){res.status(400).json({error:'An Idempotency-Key header between 8 and 200 characters is required.'});return;}
   const requestHash=createHash('sha256').update(JSON.stringify(d)).digest('hex');
   const amount=parseKesToMinorUnits(d.amount);const allocationTotal=d.allocations.reduce((sum,a)=>sum+parseKesToMinorUnits(a.amount),0n);
-  if(amount<=0n||allocationTotal!==amount){res.status(422).json({error:'Receipt amount must be positive and fully allocated to invoices.'});return;}
+  if(amount<=0n||allocationTotal>amount){res.status(422).json({error:'Receipt amount must be positive and invoice allocations cannot exceed the receipt amount.'});return;}
+  if(amount>allocationTotal&&!d.allowStudentCredit){res.status(422).json({error:'The unallocated amount must be explicitly recorded as a Student Credit Balance.'});return;}
   try{
     const outcome=await withSchoolTransaction(auth.schoolId,async c=>{
       const existing=await c.query('SELECT request_hash,response_body FROM idempotency_records WHERE school_id=$1 AND idempotency_key=$2 FOR UPDATE',[auth.schoolId,idempotencyKey]);
@@ -359,39 +386,49 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
       }
       const student=await c.query("SELECT id FROM students WHERE school_id=$1 AND id=$2 AND status='active'",[auth.schoolId,d.studentId]);
       if(!student.rowCount)throw Object.assign(new Error('Active student not found in this school.'),{statusCode:422});
-      const cashAccount=await c.query("SELECT id,account_type,is_active FROM accounts WHERE school_id=$1 AND id=$2",[auth.schoolId,d.paymentAccountId]);
-      if(!cashAccount.rowCount||cashAccount.rows[0].account_type!=='asset'||!cashAccount.rows[0].is_active)throw Object.assign(new Error('Select an active cash or bank asset account.'),{statusCode:422});
-      const receiptId=randomUUID();
+      const cashAccount=await c.query("SELECT id,code,name,account_type,is_active FROM accounts WHERE school_id=$1 AND id=$2",[auth.schoolId,d.paymentAccountId]);
+      if(!cashAccount.rowCount||cashAccount.rows[0].account_type!=='asset'||!cashAccount.rows[0].is_active)throw Object.assign(new Error('Select an active cash, bank, or M-Pesa asset account.'),{statusCode:422});
+      const accountName=String(cashAccount.rows[0].name).toLowerCase();const accountCode=String(cashAccount.rows[0].code).toLowerCase();
+      if(d.paymentMethod==='cash'&&!(accountCode==='1000'||accountName.includes('cash')))throw Object.assign(new Error('Cash payments must be posted to a Cash ledger account.'),{statusCode:422});
+      if(d.paymentMethod==='mpesa'&&!(accountName.includes('mpesa')||accountName.includes('m-pesa')||accountName.includes('mobile money')||accountCode.includes('mpesa')))throw Object.assign(new Error('M-Pesa payments must be posted to an M-Pesa / mobile-money ledger account.'),{statusCode:422});
+      if(d.paymentMethod==='bank'){const mapped=await c.query('SELECT id FROM bank_accounts WHERE school_id=$1 AND ledger_account_id=$2 AND is_active=true LIMIT 1',[auth.schoolId,d.paymentAccountId]);if(!mapped.rowCount)throw Object.assign(new Error('Bank payments must use a ledger account mapped to an active Bank Account under Cash & Bank settings.'),{statusCode:422});}
+      if(d.paymentMethod==='mpesa'&&d.externalReference?.trim()){await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`mpesa-reference:${auth.schoolId}:${d.externalReference.trim().toLowerCase()}`]);const duplicate=await c.query("SELECT id FROM fee_receipts WHERE school_id=$1 AND payment_method='mpesa' AND lower(external_reference)=lower($2) AND status='posted' LIMIT 1",[auth.schoolId,d.externalReference.trim()]);if(duplicate.rowCount)throw Object.assign(new Error('This M-Pesa transaction reference has already been recorded.'),{statusCode:409});}
+      await c.query("SELECT id FROM fee_invoices WHERE school_id=$1 AND student_id=$2 AND status NOT IN ('void','reversed') ORDER BY id FOR UPDATE",[auth.schoolId,d.studentId]);
+      const previous=await c.query(`SELECT (COALESCE(sum(i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)-COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0)),0)-COALESCE((SELECT sum(cr.remaining_amount) FROM student_fee_credits cr WHERE cr.school_id=$1 AND cr.student_id=$2 AND cr.status='posted'),0))::numeric(14,2)::text AS balance FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status NOT IN ('void','reversed')`,[auth.schoolId,d.studentId]);const previousBalance=String(previous.rows[0].balance??'0.00');
+      const receiptId=randomUUID();const receiptNumber=d.receiptNumber??await nextFeeDocumentNumber(c,auth.schoolId,'RCT',receivedOn);const studentCredit=amount-allocationTotal;
       await c.query(
-        "INSERT INTO fee_receipts (id,school_id,receipt_number,student_id,received_on,amount,payment_method,external_reference,notes,received_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-        [receiptId,auth.schoolId,d.receiptNumber,d.studentId,receivedOn,amountString(amount),d.paymentMethod,d.externalReference??null,d.notes??null,auth.userId]);
+        "INSERT INTO fee_receipts (id,school_id,receipt_number,student_id,received_on,amount,payment_method,external_reference,notes,received_by,previous_balance,new_balance) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULL)",
+        [receiptId,auth.schoolId,receiptNumber,d.studentId,receivedOn,amountString(amount),d.paymentMethod,d.externalReference??null,d.notes??null,auth.userId,previousBalance]);
       for(const allocation of d.allocations){
         const allocated=parseKesToMinorUnits(allocation.amount);
         if(allocated<=0n)throw Object.assign(new Error('Each allocation must be greater than zero.'),{statusCode:422});
         const inv=await c.query(
           `SELECT i.amount::text,i.student_id,i.status,
              COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
-             COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived
+             COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
+             COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0)::text AS credited
            FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2 FOR UPDATE`,[auth.schoolId,allocation.invoiceId]);
         if(!inv.rowCount||inv.rows[0].student_id!==d.studentId||inv.rows[0].status==='void')throw Object.assign(new Error('An allocated invoice is missing, void, or belongs to another student.'),{statusCode:422});
-        const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(inv.rows[0].allocated))-parseKesToMinorUnits(String(inv.rows[0].waived));
+        const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(inv.rows[0].allocated))-parseKesToMinorUnits(String(inv.rows[0].waived))-parseKesToMinorUnits(String(inv.rows[0].credited));
         if(allocated>outstanding)throw Object.assign(new Error('Allocation exceeds the invoice outstanding balance.'),{statusCode:422});
         await c.query('INSERT INTO fee_receipt_allocations (school_id,receipt_id,invoice_id,amount) VALUES ($1,$2,$3,$4)',[auth.schoolId,receiptId,allocation.invoiceId,amountString(allocated)]);
       }
-      const journal=await postJournal(c,auth.schoolId,auth.userId,receivedOn,`Fee receipt ${d.receiptNumber}`,'fee_receipt',receiptId,[
+      let studentCreditId:string|null=null;if(studentCredit>0n){studentCreditId=randomUUID();await c.query("INSERT INTO student_fee_credits (id,school_id,student_id,receipt_id,amount,remaining_amount,status) VALUES ($1,$2,$3,$4,$5,$5,'posted')",[studentCreditId,auth.schoolId,d.studentId,receiptId,amountString(studentCredit)]);await audit(c,auth.schoolId,auth.userId,'student.fee_credit.create','student_fee_credit',studentCreditId,{receiptId,receiptNumber,amount:amountString(studentCredit)});}
+      const journal=await postJournal(c,auth.schoolId,auth.userId,receivedOn,`Fee receipt ${receiptNumber}`,'fee_receipt',receiptId,[
         {accountId:d.paymentAccountId,debit:amountString(amount),credit:'0.00'},
         {accountCode:'1200',debit:'0.00',credit:amountString(amount)},
       ]);
       await c.query('UPDATE fee_receipts SET journal_entry_id=$3 WHERE school_id=$1 AND id=$2',[auth.schoolId,receiptId,journal.id]);
       await c.query(
         `UPDATE fee_invoices i SET status=CASE
-          WHEN COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)+COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>=i.amount THEN 'paid'
-          WHEN COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)+COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>0 THEN 'part_paid'
+          WHEN COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)+COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)+COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0)>=i.amount THEN 'paid'
+          WHEN COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)+COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)+COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0)>0 THEN 'part_paid'
           ELSE 'issued' END
          WHERE i.school_id=$1 AND i.id=ANY($2::uuid[])`,
         [auth.schoolId,d.allocations.map(a=>a.invoiceId)]);
-      await audit(c,auth.schoolId,auth.userId,'fee.receipt.post','fee_receipt',receiptId,{receiptNumber:d.receiptNumber,journalEntryId:journal.id,amount:amountString(amount)});
-      const receipt={id:receiptId,receiptNumber:d.receiptNumber,studentId:d.studentId,receivedOn,amount:amountString(amount),paymentMethod:d.paymentMethod,status:'posted',journalEntryId:journal.id};
+      const newBalanceResult=await c.query(`SELECT (COALESCE(sum(i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)-COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0)),0)-COALESCE((SELECT sum(cr.remaining_amount) FROM student_fee_credits cr WHERE cr.school_id=$1 AND cr.student_id=$2 AND cr.status='posted'),0))::numeric(14,2)::text AS balance FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status NOT IN ('void','reversed')`,[auth.schoolId,d.studentId]);const newBalance=String(newBalanceResult.rows[0].balance??'0.00');await c.query('UPDATE fee_receipts SET new_balance=$3 WHERE school_id=$1 AND id=$2',[auth.schoolId,receiptId,newBalance]);
+      await audit(c,auth.schoolId,auth.userId,'fee.receipt.post','fee_receipt',receiptId,{receiptNumber,journalEntryId:journal.id,amount:amountString(amount),previousBalance,newBalance});
+      const receipt={id:receiptId,receiptNumber,studentId:d.studentId,studentName:student.rows[0].full_name,admissionNumber:student.rows[0].admission_number,className:student.rows[0].class_name,schoolName:auth.schoolName,receivedOn,amount:amountString(amount),previousBalance,newBalance,studentCreditAmount:amountString(studentCredit),studentCreditId,paymentMethod:d.paymentMethod,externalReference:d.externalReference??null,status:'posted',journalEntryId:journal.id};
       await c.query('INSERT INTO idempotency_records (school_id,idempotency_key,request_hash,response_status,response_body,resource_type,resource_id) VALUES ($1,$2,$3,201,$4::jsonb,\'fee_receipt\',$5)',[auth.schoolId,idempotencyKey,requestHash,JSON.stringify({receipt}),receiptId]);
       return {receipt,duplicate:false};
     });
@@ -658,15 +695,16 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
   const data=await withSchoolTransaction(auth.schoolId,async c=>{
     const fees=await c.query(
       `SELECT
-       COALESCE((SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),0)::text AS billed,
+       COALESCE((SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status NOT IN ('void','reversed') AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),0)::text AS billed,
        COALESCE(CASE WHEN $4::uuid IS NULL THEN (SELECT sum(r.amount) FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)) ELSE (SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=$1 AND r.status='posted' AND fs.academic_term_id=$4::uuid AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)) END,0)::text AS collected,
-       COALESCE((SELECT sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0)) FROM fee_invoices i LEFT JOIN
+       COALESCE((SELECT sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0)-COALESCE(ca.credited,0)) FROM fee_invoices i LEFT JOIN
         (SELECT a.invoice_id,sum(a.amount) AS allocated FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND r.status='posted' GROUP BY a.invoice_id) a ON a.invoice_id=i.id LEFT JOIN
-        (SELECT invoice_id,sum(amount) AS waived FROM fee_waivers WHERE school_id=$1 AND status='posted' GROUP BY invoice_id) w ON w.invoice_id=i.id
-        WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),0)::text AS outstanding,
-       CASE WHEN COALESCE((SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),0)=0 THEN '0'
+        (SELECT invoice_id,sum(amount) AS waived FROM fee_waivers WHERE school_id=$1 AND status='posted' GROUP BY invoice_id) w ON w.invoice_id=i.id LEFT JOIN
+        (SELECT invoice_id,sum(amount) AS credited FROM student_fee_credit_allocations WHERE school_id=$1 AND status='posted' GROUP BY invoice_id) ca ON ca.invoice_id=i.id
+        WHERE i.school_id=$1 AND i.status NOT IN ('void','reversed') AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),0)::text AS outstanding,
+       CASE WHEN COALESCE((SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status NOT IN ('void','reversed') AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),0)=0 THEN '0'
        ELSE round(100.0*COALESCE(CASE WHEN $4::uuid IS NULL THEN (SELECT sum(r.amount) FROM fee_receipts r WHERE r.school_id=$1 AND r.status='posted' AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)) ELSE (SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id WHERE a.school_id=$1 AND r.status='posted' AND fs.academic_term_id=$4::uuid AND ($2::date IS NULL OR r.received_on >= $2::date) AND ($3::date IS NULL OR r.received_on <= $3::date)) END,0)/
-       (SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),2)::text END AS collection_percent`,
+       (SELECT sum(i.amount) FROM fee_invoices i WHERE i.school_id=$1 AND i.status NOT IN ('void','reversed') AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))),2)::text END AS collection_percent`,
       [auth.schoolId,dates.from,dates.to,academicTermId]);
     const expenses=await c.query(
       `SELECT count(*) FILTER (WHERE status='submitted' AND ($4::uuid IS NULL OR academic_term_id=$4::uuid))::int AS awaiting_approval,
@@ -690,7 +728,7 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
        FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
        LEFT JOIN (SELECT a.invoice_id,sum(a.amount) AS allocated FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND r.status='posted' GROUP BY a.invoice_id) a ON a.invoice_id=i.id
        LEFT JOIN (SELECT invoice_id,sum(amount) AS waived FROM fee_waivers WHERE school_id=$1 AND status='posted' GROUP BY invoice_id) w ON w.invoice_id=i.id
-       WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)
+       WHERE i.school_id=$1 AND i.status NOT IN ('void','reversed') AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)
          AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
        GROUP BY s.id HAVING sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0))>0
        ORDER BY sum(i.amount-COALESCE(a.allocated,0)-COALESCE(w.waived,0)) DESC LIMIT 5`,[auth.schoolId,dates.from,dates.to,academicTermId]);
@@ -788,11 +826,11 @@ operationsRouter.get('/overview',requirePermission('reports.read'),wrap(async(re
      const overdue=await c.query(
        `SELECT count(DISTINCT i.student_id)::int AS overdue_fee_accounts
         FROM fee_invoices i
-        WHERE i.school_id=$1 AND i.status<>'void' AND i.due_on<current_date
+        WHERE i.school_id=$1 AND i.status NOT IN ('void','reversed') AND i.due_on<current_date
           AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date)
           AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
           AND i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)
-            -COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>0`,
+            -COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)-COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0)>0`,
        [auth.schoolId,dates.from,dates.to,academicTermId]);
      const unmatchedMpesa=await c.query(
        `SELECT count(*)::int AS unmatched_mpesa_payments
@@ -1011,10 +1049,153 @@ operationsRouter.post('/suppliers',requirePermission('expenses.create'),wrap(asy
   res.status(201).json({supplier});
 }));
 
-const waiverSchema=z.object({invoiceId:z.string().uuid(),waiverNumber:z.string().trim().min(1).max(60),amount:z.string(),reason:z.string().trim().min(3).max(500),waivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()});
+operationsRouter.get('/fees/arrears',requirePermission('fees.read'),wrap(async(req,res)=>{
+ const auth=authContext(req);const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;
+ const result=await withSchoolTransaction(auth.schoolId,client=>client.query(
+  `WITH invoice_balances AS (
+    SELECT i.id,i.student_id,i.due_on,
+      (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)
+       -COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)-COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0))::numeric(14,2) AS balance
+    FROM fee_invoices i LEFT JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
+    WHERE i.school_id=$1 AND i.status NOT IN ('void','reversed') AND ($2::uuid IS NULL OR fs.academic_term_id=$2::uuid)
+  ), aged AS (
+    SELECT *,CASE WHEN due_on>=current_date THEN 0 ELSE current_date-due_on END AS days_overdue FROM invoice_balances WHERE balance>0
+  )
+  SELECT s.full_name AS student_name,s.admission_number,s.class_name,
+    COALESCE(sum(a.balance) FILTER (WHERE a.days_overdue=0),0)::numeric(14,2)::text AS current,
+    COALESCE(sum(a.balance) FILTER (WHERE a.days_overdue BETWEEN 1 AND 30),0)::numeric(14,2)::text AS days_1_30,
+    COALESCE(sum(a.balance) FILTER (WHERE a.days_overdue BETWEEN 31 AND 60),0)::numeric(14,2)::text AS days_31_60,
+    COALESCE(sum(a.balance) FILTER (WHERE a.days_overdue BETWEEN 61 AND 90),0)::numeric(14,2)::text AS days_61_90,
+    COALESCE(sum(a.balance) FILTER (WHERE a.days_overdue>90),0)::numeric(14,2)::text AS days_over_90,
+    COALESCE(sum(a.balance),0)::numeric(14,2)::text AS total_outstanding
+  FROM aged a JOIN students s ON s.school_id=$1 AND s.id=a.student_id
+  GROUP BY s.id,s.full_name,s.admission_number,s.class_name
+  HAVING sum(a.balance)>0 ORDER BY sum(a.balance) DESC,s.full_name LIMIT 5000`,[auth.schoolId,academicTermId]));
+ res.json({arrears:result.rows});
+}));
+operationsRouter.get('/fees/statements/:studentId',requirePermission('fees.read'),wrap(async(req,res)=>{
+ const id=z.string().uuid().safeParse(req.params.studentId);if(!id.success){res.status(400).json({error:'Invalid student ID.'});return;}
+ const dates=reportDateFilters(req,res);if(!dates)return;const auth=authContext(req);
+ const result=await withSchoolTransaction(auth.schoolId,async client=>{
+  const student=await client.query('SELECT id,admission_number,full_name,class_name FROM students WHERE school_id=$1 AND id=$2',[auth.schoolId,id.data]);
+  if(!student.rowCount)throw Object.assign(new Error('Student not found in this school.'),{statusCode:404});
+  const rows=await client.query(
+   `WITH transactions AS (
+     SELECT i.issued_on AS transaction_date,'Invoice'::text AS transaction_type,i.invoice_number AS reference,i.description,
+       i.amount::numeric(14,2) AS debit,0::numeric(14,2) AS credit,1 AS sort_order
+     FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2
+     UNION ALL
+     SELECT r.received_on,'Payment',r.receipt_number,'Payment allocated to invoice '||i.invoice_number,
+       0::numeric(14,2),a.amount::numeric(14,2),2
+     FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
+     JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+     WHERE a.school_id=$1 AND i.student_id=$2
+     UNION ALL
+     SELECT w.waived_on,'Waiver / adjustment',w.waiver_number,w.reason,0::numeric(14,2),w.amount::numeric(14,2),3
+     FROM fee_waivers w JOIN fee_invoices i ON i.school_id=w.school_id AND i.id=w.invoice_id
+     WHERE w.school_id=$1 AND i.student_id=$2 AND w.status IN ('posted','reversed')
+     UNION ALL
+     SELECT r.received_on,'Student credit',r.receipt_number,'Unallocated payment held as student credit',0::numeric(14,2),cr.amount::numeric(14,2),5
+     FROM student_fee_credits cr JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id
+     WHERE cr.school_id=$1 AND cr.student_id=$2
+     UNION ALL
+     SELECT ca.created_at::date,'Credit allocation',r.receipt_number,'Student credit applied to invoice '||i.invoice_number,ca.amount::numeric(14,2),ca.amount::numeric(14,2),3
+     FROM student_fee_credit_allocations ca JOIN student_fee_credits cr ON cr.school_id=ca.school_id AND cr.id=ca.credit_id JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id JOIN fee_invoices i ON i.school_id=ca.school_id AND i.id=ca.invoice_id
+     WHERE ca.school_id=$1 AND cr.student_id=$2
+     UNION ALL
+     SELECT ca.reversed_at::date,'Credit allocation reversal',r.receipt_number,'Reversal of student credit allocation to invoice '||i.invoice_number,ca.amount::numeric(14,2),ca.amount::numeric(14,2),4
+     FROM student_fee_credit_allocations ca JOIN student_fee_credits cr ON cr.school_id=ca.school_id AND cr.id=ca.credit_id JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id JOIN fee_invoices i ON i.school_id=ca.school_id AND i.id=ca.invoice_id
+     WHERE ca.school_id=$1 AND cr.student_id=$2 AND ca.status='reversed'
+     UNION ALL
+     SELECT rev.posting_date,'Reversal',r.receipt_number,'Reversal of student credit balance',cr.amount::numeric(14,2),0::numeric(14,2),4
+     FROM student_fee_credits cr JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id
+     JOIN journal_entries rev ON rev.school_id=r.school_id AND rev.reversal_of_id=r.journal_entry_id AND rev.status='posted'
+     WHERE cr.school_id=$1 AND cr.student_id=$2 AND cr.status='reversed'
+     UNION ALL
+     SELECT rev.posting_date,'Reversal',r.receipt_number,'Reversal of receipt allocation for invoice '||i.invoice_number,
+       a.amount::numeric(14,2),0::numeric(14,2),4
+     FROM fee_receipts r JOIN fee_receipt_allocations a ON a.school_id=r.school_id AND a.receipt_id=r.id
+     JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+     JOIN journal_entries rev ON rev.school_id=r.school_id AND rev.reversal_of_id=r.journal_entry_id AND rev.status='posted'
+     WHERE r.school_id=$1 AND i.student_id=$2 AND r.status='reversed'
+     UNION ALL
+     SELECT rev.posting_date,'Reversal',i.invoice_number,'Reversal of invoice '||i.invoice_number,
+       0::numeric(14,2),i.amount::numeric(14,2),4
+     FROM fee_invoices i JOIN journal_entries original ON original.school_id=i.school_id AND original.source_type='fee_invoice' AND original.source_id=i.id
+     JOIN journal_entries rev ON rev.school_id=original.school_id AND rev.reversal_of_id=original.id AND rev.status='posted'
+     WHERE i.school_id=$1 AND i.student_id=$2 AND i.status IN ('void','reversed')
+     UNION ALL
+     SELECT rev.posting_date,'Reversal',w.waiver_number,'Reversal of waiver '||w.waiver_number,
+       w.amount::numeric(14,2),0::numeric(14,2),4
+     FROM fee_waivers w JOIN fee_invoices i ON i.school_id=w.school_id AND i.id=w.invoice_id
+     JOIN journal_entries original ON original.school_id=w.school_id AND original.source_type='fee_waiver' AND original.source_id=w.id
+     JOIN journal_entries rev ON rev.school_id=original.school_id AND rev.reversal_of_id=original.id AND rev.status='posted'
+     WHERE w.school_id=$1 AND i.student_id=$2
+   ), opening AS (
+     SELECT COALESCE(sum(debit-credit) FILTER (WHERE ($3::date IS NOT NULL AND transaction_date<$3::date)),0)::numeric(14,2) AS balance FROM transactions
+   ), filtered AS (
+     SELECT * FROM transactions WHERE ($3::date IS NULL OR transaction_date >= $3::date) AND ($4::date IS NULL OR transaction_date <= $4::date)
+   )
+   SELECT transaction_date,transaction_type,reference,description,debit::text,credit::text,
+     (SELECT balance FROM opening)+sum(debit-credit) OVER (ORDER BY transaction_date,sort_order,reference ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::numeric(14,2)::text AS running_balance
+   FROM filtered ORDER BY transaction_date,sort_order,reference LIMIT 10000`,
+   [auth.schoolId,id.data,dates.from,dates.to]);
+  const opening=await client.query(
+   `WITH tx AS (
+     SELECT i.issued_on AS d,i.amount AS delta FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2
+     UNION ALL SELECT r.received_on,-a.amount FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id WHERE a.school_id=$1 AND i.student_id=$2
+     UNION ALL SELECT w.waived_on,-w.amount FROM fee_waivers w JOIN fee_invoices i ON i.school_id=w.school_id AND i.id=w.invoice_id WHERE w.school_id=$1 AND i.student_id=$2 AND w.status IN ('posted','reversed')
+     UNION ALL SELECT rev.posting_date,a.amount FROM fee_receipts r JOIN fee_receipt_allocations a ON a.school_id=r.school_id AND a.receipt_id=r.id JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN journal_entries rev ON rev.school_id=r.school_id AND rev.reversal_of_id=r.journal_entry_id AND rev.status='posted' WHERE r.school_id=$1 AND i.student_id=$2 AND r.status='reversed'
+     UNION ALL SELECT r.received_on,-cr.amount FROM student_fee_credits cr JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id WHERE cr.school_id=$1 AND cr.student_id=$2
+     UNION ALL SELECT rev.posting_date,cr.amount FROM student_fee_credits cr JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id JOIN journal_entries rev ON rev.school_id=r.school_id AND rev.reversal_of_id=r.journal_entry_id AND rev.status='posted' WHERE cr.school_id=$1 AND cr.student_id=$2 AND cr.status='reversed'
+     UNION ALL SELECT rev.posting_date,-i.amount FROM fee_invoices i JOIN journal_entries original ON original.school_id=i.school_id AND original.source_type='fee_invoice' AND original.source_id=i.id JOIN journal_entries rev ON rev.school_id=original.school_id AND rev.reversal_of_id=original.id AND rev.status='posted' WHERE i.school_id=$1 AND i.student_id=$2 AND i.status IN ('void','reversed')
+     UNION ALL SELECT rev.posting_date,w.amount FROM fee_waivers w JOIN fee_invoices i ON i.school_id=w.school_id AND i.id=w.invoice_id JOIN journal_entries original ON original.school_id=w.school_id AND original.source_type='fee_waiver' AND original.source_id=w.id JOIN journal_entries rev ON rev.school_id=original.school_id AND rev.reversal_of_id=original.id AND rev.status='posted' WHERE w.school_id=$1 AND i.student_id=$2
+   ) SELECT COALESCE(sum(delta) FILTER (WHERE ($3::date IS NOT NULL AND d<$3::date)),0)::numeric(14,2)::text AS opening_balance FROM tx`,
+   [auth.schoolId,id.data,dates.from]);
+  return {student:student.rows[0],openingBalance:opening.rows[0].opening_balance,transactions:rows.rows,from:dates.from,to:dates.to};
+ });
+ res.json({statement:result});
+}));
+const schoolClassSchema=z.object({name:z.string().trim().min(1).max(120)});
+operationsRouter.get('/settings/classes',requirePermission('fees.read'),wrap(async(req,res)=>{const auth=authContext(req);const result=await withSchoolTransaction(auth.schoolId,client=>client.query('SELECT id,name,is_active,created_at FROM school_classes WHERE school_id=$1 ORDER BY is_active DESC,name',[auth.schoolId]));res.json({classes:result.rows});}));
+operationsRouter.post('/settings/classes',requirePermission('school.manage'),wrap(async(req,res)=>{const p=schoolClassSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Enter a class or stream name.'});return;}const auth=authContext(req);try{const result=await withSchoolTransaction(auth.schoolId,async client=>{const row=await client.query('INSERT INTO school_classes (id,school_id,name,created_by) VALUES ($1,$2,$3,$4) RETURNING id,name,is_active,created_at',[randomUUID(),auth.schoolId,p.data.name,auth.userId]);await audit(client,auth.schoolId,auth.userId,'school.class.create','school_class',row.rows[0].id,{name:p.data.name});return row.rows[0];});res.status(201).json({class:result});}catch(error){if(!handleError(res,error))throw error;}}));
+const schoolFeeItemSchema=z.object({name:z.string().trim().min(1).max(100),defaultAmount:z.string().regex(/^\d+(?:\.\d{1,2})?$/).optional()});
+operationsRouter.put('/settings/fee-items/:id',requirePermission('school.manage'),wrap(async(req,res)=>{
+ const id=z.string().uuid().safeParse(req.params.id);const p=z.object({name:z.string().trim().min(1).max(100),defaultAmount:z.string().regex(/^\d+(?:\.\d{1,2})?$/),isActive:z.preprocess(value=>value==='true'?true:value==='false'?false:value,z.boolean())}).safeParse(req.body);if(!id.success||!p.success){res.status(400).json({error:'Provide a fee item name, default amount and active state.'});return;}const auth=authContext(req);
+ try{const row=await withSchoolTransaction(auth.schoolId,async client=>{const result=await client.query('UPDATE school_fee_items SET name=$3,default_amount=$4,is_active=$5 WHERE school_id=$1 AND id=$2 RETURNING id,name,default_amount::text,is_active,created_at',[auth.schoolId,id.data,p.data.name,p.data.defaultAmount,p.data.isActive]);if(!result.rowCount)throw Object.assign(new Error('Fee item not found.'),{statusCode:404});await audit(client,auth.schoolId,auth.userId,'school.fee_item.update','school_fee_item',id.data,{name:p.data.name,defaultAmount:p.data.defaultAmount,isActive:p.data.isActive});return result.rows[0];});res.json({feeItem:row});}catch(error){if(!handleError(res,error))throw error;}
+}));
+operationsRouter.get('/settings/fee-items',requirePermission('fees.read'),wrap(async(req,res)=>{const auth=authContext(req);const result=await withSchoolTransaction(auth.schoolId,client=>client.query('SELECT id,name,default_amount::text,is_active,created_at FROM school_fee_items WHERE school_id=$1 ORDER BY is_active DESC,name',[auth.schoolId]));res.json({feeItems:result.rows});}));
+operationsRouter.post('/settings/fee-items',requirePermission('school.manage'),wrap(async(req,res)=>{const p=schoolFeeItemSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Enter a fee item name and a valid optional default amount.'});return;}const auth=authContext(req);try{const result=await withSchoolTransaction(auth.schoolId,async client=>{const row=await client.query('INSERT INTO school_fee_items (id,school_id,name,default_amount,created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id,name,default_amount::text,is_active,created_at',[randomUUID(),auth.schoolId,p.data.name,p.data.defaultAmount??'0',auth.userId]);await audit(client,auth.schoolId,auth.userId,'school.fee_item.create','school_fee_item',row.rows[0].id,{name:p.data.name,defaultAmount:row.rows[0].default_amount});return row.rows[0];});res.status(201).json({feeItem:result});}catch(error){if(!handleError(res,error))throw error;}}));
+
+operationsRouter.get('/fees/credits',requirePermission('fees.read'),wrap(async(req,res)=>{const auth=authContext(req);const result=await withSchoolTransaction(auth.schoolId,client=>client.query(`SELECT cr.id,cr.student_id,s.admission_number,s.full_name AS student_name,s.class_name,r.receipt_number,cr.amount::text,cr.remaining_amount::text,cr.created_at,COALESCE((SELECT json_agg(json_build_object('id',ca.id,'invoiceNumber',i.invoice_number,'amount',ca.amount::text,'status',ca.status) ORDER BY ca.created_at) FROM student_fee_credit_allocations ca JOIN fee_invoices i ON i.school_id=ca.school_id AND i.id=ca.invoice_id WHERE ca.school_id=cr.school_id AND ca.credit_id=cr.id),'[]'::json) AS allocations FROM student_fee_credits cr JOIN students s ON s.school_id=cr.school_id AND s.id=cr.student_id JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id WHERE cr.school_id=$1 AND cr.status='posted' AND (cr.remaining_amount>0 OR EXISTS (SELECT 1 FROM student_fee_credit_allocations ca WHERE ca.school_id=cr.school_id AND ca.credit_id=cr.id AND ca.status='posted')) ORDER BY cr.created_at DESC LIMIT 1000`,[auth.schoolId]));res.json({credits:result.rows});}));
+const creditAllocationSchema=z.object({invoiceId:z.string().uuid(),amount:z.string().regex(/^\d+(?:\.\d{1,2})?$/)});
+operationsRouter.post('/fees/credits/:id/allocate',requirePermission('receipts.create'),wrap(async(req,res)=>{
+ const id=z.string().uuid().safeParse(req.params.id);const body=creditAllocationSchema.safeParse(req.body);if(!id.success||!body.success){res.status(400).json({error:'Provide a student credit ID, invoice and positive amount.'});return;}
+ const auth=authContext(req);const amount=parseKesToMinorUnits(body.data.amount);if(amount<=0n){res.status(422).json({error:'Credit allocation must be positive.'});return;}
+ try{const result=await withSchoolTransaction(auth.schoolId,async client=>{
+  const credit=await client.query("SELECT id,student_id,remaining_amount::text,status FROM student_fee_credits WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);if(!credit.rowCount||credit.rows[0].status!=='posted')throw Object.assign(new Error('Student credit is not available.'),{statusCode:404});if(amount>parseKesToMinorUnits(String(credit.rows[0].remaining_amount)))throw Object.assign(new Error('Allocation exceeds the remaining student credit.'),{statusCode:422});
+  const invoice=await client.query("SELECT id,student_id,amount::text,status FROM fee_invoices WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,body.data.invoiceId]);if(!invoice.rowCount||invoice.rows[0].student_id!==credit.rows[0].student_id||['void','reversed'].includes(String(invoice.rows[0].status)))throw Object.assign(new Error('Choose a valid invoice belonging to the same student.'),{statusCode:422});
+  const settled=await client.query(`SELECT COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=$1 AND a.invoice_id=$2 AND r.status='posted'),0)::text AS paid,COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=$1 AND w.invoice_id=$2 AND w.status='posted'),0)::text AS waived,COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=$1 AND ca.invoice_id=$2 AND ca.status='posted'),0)::text AS credited`,[auth.schoolId,body.data.invoiceId]);
+  const outstanding=parseKesToMinorUnits(String(invoice.rows[0].amount))-parseKesToMinorUnits(String(settled.rows[0].paid))-parseKesToMinorUnits(String(settled.rows[0].waived))-parseKesToMinorUnits(String(settled.rows[0].credited));if(amount>outstanding)throw Object.assign(new Error('Credit allocation exceeds the invoice outstanding balance.'),{statusCode:422});
+  const allocationId=randomUUID();await client.query('INSERT INTO student_fee_credit_allocations (id,school_id,credit_id,invoice_id,amount) VALUES ($1,$2,$3,$4,$5)',[allocationId,auth.schoolId,id.data,body.data.invoiceId,amountString(amount)]);await client.query('UPDATE student_fee_credits SET remaining_amount=remaining_amount-$3 WHERE school_id=$1 AND id=$2',[auth.schoolId,id.data,amountString(amount)]);
+  const total=parseKesToMinorUnits(String(settled.rows[0].paid))+parseKesToMinorUnits(String(settled.rows[0].waived))+parseKesToMinorUnits(String(settled.rows[0].credited))+amount;await client.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,body.data.invoiceId,amountString(total),amountString(total)]);
+  await audit(client,auth.schoolId,auth.userId,'student.fee_credit.allocate','student_fee_credit_allocation',allocationId,{creditId:id.data,invoiceId:body.data.invoiceId,amount:amountString(amount)});return {id:allocationId,creditId:id.data,invoiceId:body.data.invoiceId,amount:amountString(amount),status:'posted'};
+ });res.status(201).json({allocation:result});}catch(error){if(!handleError(res,error))throw error;}
+}));
+operationsRouter.post('/fees/credits/allocations/:allocationId/reverse',requirePermission('receipts.create'),wrap(async(req,res)=>{
+ const id=z.string().uuid().safeParse(req.params.allocationId);const body=z.object({reason:z.string().trim().min(3).max(500)}).safeParse(req.body);if(!id.success||!body.success){res.status(400).json({error:'Provide a credit allocation ID and reversal reason.'});return;}
+ const auth=authContext(req);
+ try{const result=await withSchoolTransaction(auth.schoolId,async client=>{
+  const allocation=await client.query("SELECT ca.id,ca.credit_id,ca.invoice_id,ca.amount::text,ca.status,cr.student_id FROM student_fee_credit_allocations ca JOIN student_fee_credits cr ON cr.school_id=ca.school_id AND cr.id=ca.credit_id WHERE ca.school_id=$1 AND ca.id=$2 FOR UPDATE OF ca,cr",[auth.schoolId,id.data]);if(!allocation.rowCount||allocation.rows[0].status!=='posted')throw Object.assign(new Error('Only an active credit allocation can be reversed.'),{statusCode:409});const row=allocation.rows[0];
+  await client.query("UPDATE student_fee_credit_allocations SET status='reversed',reversed_by=$3,reversed_at=now(),reversal_reason=$4 WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data,auth.userId,body.data.reason]);await client.query('UPDATE student_fee_credits SET remaining_amount=remaining_amount+$3 WHERE school_id=$1 AND id=$2 AND status=\'posted\'',[auth.schoolId,row.credit_id,row.amount]);
+  const settled=await client.query(`SELECT i.amount::text,COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS paid,COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0)::text AS credited FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2`,[auth.schoolId,row.invoice_id]);const total=parseKesToMinorUnits(String(settled.rows[0].paid))+parseKesToMinorUnits(String(settled.rows[0].waived))+parseKesToMinorUnits(String(settled.rows[0].credited));const amount=parseKesToMinorUnits(String(settled.rows[0].amount));await client.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,row.invoice_id,amountString(total),amountString(total)]);
+  await audit(client,auth.schoolId,auth.userId,'student.fee_credit.allocation.reverse','student_fee_credit_allocation',id.data,{creditId:row.credit_id,invoiceId:row.invoice_id,reason:body.data.reason});return {id:id.data,status:'reversed',reason:body.data.reason};
+ });res.json({allocation:result});}catch(error){if(!handleError(res,error))throw error;}
+}));
+const waiverSchema=z.object({invoiceId:z.string().uuid(),waiverNumber:z.string().trim().min(1).max(60),adjustmentType:z.enum(['waiver','scholarship','discount','correction','credit_adjustment']).default('waiver'),amount:z.string(),reason:z.string().trim().min(3).max(500),waivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()});
 operationsRouter.get('/fees/waivers',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);const r=await withSchoolTransaction(auth.schoolId,c=>c.query(
-    'SELECT w.id,w.waiver_number,w.invoice_id,i.invoice_number,w.amount::text,w.reason,w.waived_on,w.status,w.journal_entry_id FROM fee_waivers w JOIN fee_invoices i ON i.id=w.invoice_id AND i.school_id=w.school_id WHERE w.school_id=$1 ORDER BY w.created_at DESC LIMIT 500',[auth.schoolId]));
+    'SELECT w.id,w.waiver_number,w.adjustment_type,w.invoice_id,i.invoice_number,w.amount::text,w.reason,w.waived_on,w.status,w.created_by,requester.full_name AS requested_by_name,w.approved_by,approver.full_name AS approved_by_name,w.approved_at,w.rejection_reason,w.rejected_by,rejector.full_name AS rejected_by_name,w.rejected_at,w.journal_entry_id FROM fee_waivers w JOIN fee_invoices i ON i.id=w.invoice_id AND i.school_id=w.school_id LEFT JOIN users requester ON requester.id=w.created_by LEFT JOIN users approver ON approver.id=w.approved_by LEFT JOIN users rejector ON rejector.id=w.rejected_by WHERE w.school_id=$1 ORDER BY w.created_at DESC LIMIT 500',[auth.schoolId]));
   res.json({waivers:r.rows});
 }));
 operationsRouter.post('/fees/waivers',requirePermission('fees.manage'),wrap(async(req,res)=>{
@@ -1027,16 +1208,22 @@ operationsRouter.post('/fees/waivers',requirePermission('fees.manage'),wrap(asyn
       if(!inv.rowCount||inv.rows[0].status==='void')throw Object.assign(new Error('Invoice was not found or has been voided.'),{statusCode:422});
       const settled=await c.query(
         `SELECT COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=$2 AND r.status='posted'),0)::text AS allocated,
-         COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived`,[auth.schoolId,d.invoiceId]);
-      const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(settled.rows[0].allocated))-parseKesToMinorUnits(String(settled.rows[0].waived));
+         COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived,COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=$1 AND ca.invoice_id=$2 AND ca.status='posted'),0)::text AS credited`,[auth.schoolId,d.invoiceId]);
+      const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(settled.rows[0].allocated))-parseKesToMinorUnits(String(settled.rows[0].waived))-parseKesToMinorUnits(String(settled.rows[0].credited));
       if(amount>outstanding)throw Object.assign(new Error('Waiver exceeds the invoice outstanding balance.'),{statusCode:422});
       const id=randomUUID();
-      await c.query("INSERT INTO fee_waivers (id,school_id,waiver_number,invoice_id,amount,reason,waived_on,created_by,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'submitted')",[id,auth.schoolId,d.waiverNumber,d.invoiceId,amountString(amount),d.reason,waivedOn,auth.userId]);
-      await audit(c,auth.schoolId,auth.userId,'fee.waiver.submit','fee_waiver',id,{invoiceId:d.invoiceId,amount:amountString(amount),reason:d.reason});
-      return {id,waiverNumber:d.waiverNumber,invoiceId:d.invoiceId,amount:amountString(amount),reason:d.reason,status:'submitted'};
+      await c.query("INSERT INTO fee_waivers (id,school_id,waiver_number,adjustment_type,invoice_id,amount,reason,waived_on,created_by,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'submitted')",[id,auth.schoolId,d.waiverNumber,d.adjustmentType,d.invoiceId,amountString(amount),d.reason,waivedOn,auth.userId]);
+      await audit(c,auth.schoolId,auth.userId,'fee.waiver.submit','fee_waiver',id,{invoiceId:d.invoiceId,adjustmentType:d.adjustmentType,amount:amountString(amount),reason:d.reason});
+      return {id,waiverNumber:d.waiverNumber,adjustmentType:d.adjustmentType,invoiceId:d.invoiceId,amount:amountString(amount),reason:d.reason,status:'submitted'};
     });
     res.status(201).json({waiver,message:'Waiver submitted. A different authorized user must approve it before it affects the ledger.'});
   }catch(error){if(!handleError(res,error))throw error;}
+}));
+operationsRouter.post('/fees/waivers/:id/reject',requirePermission('fees.manage'),wrap(async(req,res)=>{
+ const id=z.string().uuid().safeParse(req.params.id);const body=z.object({reason:z.string().trim().min(3).max(500)}).safeParse(req.body);
+ if(!id.success||!body.success){res.status(400).json({error:'Provide a waiver ID and rejection reason.'});return;}
+ const auth=authContext(req);
+ try{const result=await withSchoolTransaction(auth.schoolId,async client=>{const found=await client.query('SELECT id,waiver_number,status,created_by FROM fee_waivers WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,id.data]);if(!found.rowCount||found.rows[0].status!=='submitted')throw Object.assign(new Error('Only a submitted waiver request can be rejected.'),{statusCode:409});if(String(found.rows[0].created_by)===auth.userId)throw Object.assign(new Error('The requester cannot reject their own adjustment request.'),{statusCode:403});await client.query("UPDATE fee_waivers SET status='rejected',rejection_reason=$3,rejected_by=$4,rejected_at=now() WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data,body.data.reason,auth.userId]);await audit(client,auth.schoolId,auth.userId,'fee.waiver.reject','fee_waiver',id.data,{waiverNumber:found.rows[0].waiver_number,requestedBy:found.rows[0].created_by,reason:body.data.reason});return {id:id.data,status:'rejected',reason:body.data.reason};});res.json({waiver:result});}catch(error){if(!handleError(res,error))throw error;}
 }));
 operationsRouter.post('/fees/waivers/:id/approve',requirePermission('fees.manage'),wrap(async(req,res)=>{
   const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid waiver ID.'});return;}
@@ -1050,15 +1237,15 @@ operationsRouter.post('/fees/waivers/:id/approve',requirePermission('fees.manage
       if(!inv.rowCount||inv.rows[0].status==='void')throw Object.assign(new Error('The invoice is no longer available.'),{statusCode:409});
       const settled=await c.query(
         `SELECT COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=$2 AND r.status='posted'),0)::text AS allocated,
-         COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived`,[auth.schoolId,w.invoice_id]);
-      const amount=parseKesToMinorUnits(String(w.amount));const allocated=parseKesToMinorUnits(String(settled.rows[0].allocated));const waived=parseKesToMinorUnits(String(settled.rows[0].waived));
-      if(amount>parseKesToMinorUnits(String(inv.rows[0].amount))-allocated-waived)throw Object.assign(new Error('Invoice balance changed; the waiver no longer fits the outstanding amount.'),{statusCode:409});
+         COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived,COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=$1 AND ca.invoice_id=$2 AND ca.status='posted'),0)::text AS credited`,[auth.schoolId,w.invoice_id]);
+      const amount=parseKesToMinorUnits(String(w.amount));const allocated=parseKesToMinorUnits(String(settled.rows[0].allocated));const waived=parseKesToMinorUnits(String(settled.rows[0].waived));const credited=parseKesToMinorUnits(String(settled.rows[0].credited));
+      if(amount>parseKesToMinorUnits(String(inv.rows[0].amount))-allocated-waived-credited)throw Object.assign(new Error('Invoice balance changed; the waiver no longer fits the outstanding amount.'),{statusCode:409});
       const journal=await postJournal(c,auth.schoolId,auth.userId,sqlDate(w.waived_on),'Fee waiver '+String(w.waiver_number),'fee_waiver',id.data,[
         {accountCode:'4200',debit:amountString(amount),credit:'0.00'},
         {accountCode:'1200',debit:'0.00',credit:amountString(amount)},
       ]);
       await c.query("UPDATE fee_waivers SET status='posted',approved_by=$3,approved_at=now(),journal_entry_id=$4 WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data,auth.userId,journal.id]);
-      const total=allocated+waived+amount;
+      const total=allocated+waived+credited+amount;
       await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,w.invoice_id,amountString(total),amountString(allocated)]);
       await audit(c,auth.schoolId,auth.userId,'fee.waiver.approve','fee_waiver',id.data,{journalEntryId:journal.id,requestedBy:w.created_by});
       return {id:id.data,status:'posted',journalEntryId:journal.id,approvedBy:auth.userId};
@@ -1082,8 +1269,9 @@ operationsRouter.post('/ledger/journals/:id/reverse',requirePermission('ledger.p
       if(source==='fee_invoice'&&sourceId){
         const settled=await c.query(
           `SELECT (SELECT count(*) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=$2 AND r.status='posted') AS receipts,
-           (SELECT count(*) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted') AS waivers`,[auth.schoolId,sourceId]);
-        if(Number(settled.rows[0].receipts)>0||Number(settled.rows[0].waivers)>0)throw Object.assign(new Error('Reverse posted receipts and waivers before voiding this invoice.'),{statusCode:409});
+           (SELECT count(*) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted') AS waivers,
+           (SELECT count(*) FROM student_fee_credit_allocations WHERE school_id=$1 AND invoice_id=$2 AND status='posted') AS credits`,[auth.schoolId,sourceId]);
+        if(Number(settled.rows[0].receipts)>0||Number(settled.rows[0].waivers)>0||Number(settled.rows[0].credits)>0)throw Object.assign(new Error('Reverse posted receipts and waivers before voiding this invoice.'),{statusCode:409});
       }
       if(source==='expense_approval'&&sourceId){
         const exp=await c.query('SELECT status FROM expenses WHERE school_id=$1 AND id=$2',[auth.schoolId,sourceId]);
@@ -1094,16 +1282,19 @@ operationsRouter.post('/ledger/journals/:id/reverse',requirePermission('ledger.p
       const journal=await postJournal(c,auth.schoolId,auth.userId,reversalDate,`Reversal of ${original.rows[0].entry_number}: ${p.data.reason}`,'reversal',id.data,lines,id.data);
       if(source==='fee_invoice'&&sourceId)await c.query("UPDATE fee_invoices SET status='void' WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
       if(source==='fee_receipt'&&sourceId){
+        const usedCredit=await c.query("SELECT COALESCE(sum(a.amount),0)::text AS used FROM student_fee_credit_allocations a JOIN student_fee_credits cr ON cr.id=a.credit_id AND cr.school_id=a.school_id WHERE a.school_id=$1 AND cr.receipt_id=$2 AND a.status='posted'",[auth.schoolId,sourceId]);if(parseKesToMinorUnits(String(usedCredit.rows[0].used))>0n)throw Object.assign(new Error('This receipt has student credit that has already been allocated. Reverse those credit allocations before reversing the receipt.'),{statusCode:409});
         await c.query("UPDATE fee_receipts SET status='reversed' WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
+        await c.query("UPDATE student_fee_credits SET status='reversed',remaining_amount=0 WHERE school_id=$1 AND receipt_id=$2",[auth.schoolId,sourceId]);
         const invoices=await c.query('SELECT DISTINCT invoice_id FROM fee_receipt_allocations WHERE school_id=$1 AND receipt_id=$2',[auth.schoolId,sourceId]);
         for(const row of invoices.rows){
           const settlement=await c.query(
             `SELECT i.amount::text,
              COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
-             COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=i.id AND status='posted'),0)::text AS waived
+             COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=i.id AND status='posted'),0)::text AS waived,
+             COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=$1 AND ca.invoice_id=i.id AND ca.status='posted'),0)::text AS credited
              FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2`,[auth.schoolId,row.invoice_id]);
           if(settlement.rowCount){
-            const total=parseKesToMinorUnits(String(settlement.rows[0].allocated))+parseKesToMinorUnits(String(settlement.rows[0].waived));
+            const total=parseKesToMinorUnits(String(settlement.rows[0].allocated))+parseKesToMinorUnits(String(settlement.rows[0].waived))+parseKesToMinorUnits(String(settlement.rows[0].credited));
             const amount=parseKesToMinorUnits(String(settlement.rows[0].amount));
             await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,row.invoice_id,amountString(total),String(settlement.rows[0].allocated)]);
           }
@@ -1116,9 +1307,10 @@ operationsRouter.post('/ledger/journals/:id/reverse',requirePermission('ledger.p
           const t=await c.query(
             `SELECT i.amount::text,
              COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
-             COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=i.id AND status='posted'),0)::text AS waived
+             COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=i.id AND status='posted'),0)::text AS waived,
+             COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=$1 AND ca.invoice_id=i.id AND ca.status='posted'),0)::text AS credited
              FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2`,[auth.schoolId,w.rows[0].invoice_id]);
-          if(t.rowCount){const total=parseKesToMinorUnits(String(t.rows[0].allocated))+parseKesToMinorUnits(String(t.rows[0].waived));await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,w.rows[0].invoice_id,amountString(total),String(t.rows[0].allocated)]);}
+          if(t.rowCount){const total=parseKesToMinorUnits(String(t.rows[0].allocated))+parseKesToMinorUnits(String(t.rows[0].waived))+parseKesToMinorUnits(String(t.rows[0].credited));await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,w.rows[0].invoice_id,amountString(total),String(t.rows[0].allocated)]);}
         }
       }
       if(source==='expense_payment'&&sourceId)await c.query("UPDATE expenses SET status='approved',paid_at=NULL,payment_journal_entry_id=NULL WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
@@ -1243,7 +1435,97 @@ operationsRouter.post('/accounting/years/:id/close',requirePermission('periods.m
 }));
 
 function todayIso(){return new Date().toISOString().slice(0,10);}
+async function nextFeeDocumentNumber(c:PoolClient,schoolId:string,prefix:'INV'|'RCT',date:string):Promise<string>{
+  const year=date.slice(0,4);
+  const table=prefix==='INV'?'fee_invoices':'fee_receipts';
+  const column=prefix==='INV'?'invoice_number':'receipt_number';
+  const lockKey='fee-number:'+schoolId+':'+prefix+':'+year;
+  await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[lockKey]);
+  const base=prefix+'-'+year+'-';
+  const query="SELECT COALESCE(MAX(CASE WHEN substring("+column+" from $3) ~ '^[0-9]+$' THEN substring("+column+" from $3)::bigint END),0) AS sequence FROM "+table+" WHERE school_id=$1 AND "+column+" LIKE $2";
+  const result=await c.query(query,[schoolId,base+'%',base.length+1]);
+  const next=Number(result.rows[0].sequence)+1;
+  return base+String(next).padStart(6,'0');
+}
 
+operationsRouter.get('/budgets',requirePermission('reports.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);
+  const yearId=typeof req.query.financialYearId==='string'?req.query.financialYearId:null;
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    `SELECT b.id,b.name,b.financial_year_id,y.name AS financial_year_name,b.account_id,a.code,a.name AS account_name,
+      b.budget_amount::text,b.status,b.approved_at,
+      COALESCE((SELECT sum(l.debit-l.credit) FROM journal_lines l JOIN journal_entries j ON j.id=l.journal_entry_id AND j.school_id=l.school_id WHERE l.school_id=b.school_id AND l.account_id=b.account_id AND j.financial_year_id=b.financial_year_id AND j.status='posted'),0)::text AS actual
+     FROM budgets b JOIN financial_years y ON y.id=b.financial_year_id AND y.school_id=b.school_id
+     JOIN accounts a ON a.id=b.account_id AND a.school_id=b.school_id
+     WHERE b.school_id=$1 AND ($2::uuid IS NULL OR b.financial_year_id=$2)
+     ORDER BY y.starts_on DESC,a.code,b.name`,[auth.schoolId,yearId]));
+  res.json({budgets:result.rows});
+}));
+operationsRouter.post('/budgets',requirePermission('periods.manage'),wrap(async(req,res)=>{
+  const p=z.object({financialYearId:z.string().uuid(),accountId:z.string().uuid(),name:z.string().trim().min(2).max(120),budgetAmount:z.string()}).safeParse(req.body);
+  if(!p.success){res.status(400).json({error:'Invalid budget details.',details:p.error.flatten()});return;}
+  const auth=authContext(req);const d=p.data;const amount=parseKesToMinorUnits(d.budgetAmount);
+  try{
+    const budget=await withSchoolTransaction(auth.schoolId,async c=>{
+      const year=await c.query("SELECT id FROM financial_years WHERE school_id=$1 AND id=$2 AND status='open'",[auth.schoolId,d.financialYearId]);
+      const account=await c.query("SELECT id,account_type FROM accounts WHERE school_id=$1 AND id=$2 AND is_active=true",[auth.schoolId,d.accountId]);
+      if(!year.rowCount||!account.rowCount||account.rows[0].account_type!=='expense')throw Object.assign(new Error('Select an open financial year and active expense account.'),{statusCode:422});
+      const r=await c.query('INSERT INTO budgets (school_id,financial_year_id,account_id,name,budget_amount,created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,name,financial_year_id,account_id,budget_amount::text,status',[auth.schoolId,d.financialYearId,d.accountId,d.name,amountString(amount),auth.userId]);
+      await audit(c,auth.schoolId,auth.userId,'budget.create','budget',r.rows[0].id);
+      return r.rows[0];
+    });
+    res.status(201).json({budget});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+operationsRouter.post('/budgets/:id/approve',requirePermission('periods.manage'),wrap(async(req,res)=>{
+  const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid budget ID.'});return;}
+  const auth=authContext(req);
+  try{
+    const budget=await withSchoolTransaction(auth.schoolId,async c=>{
+      const r=await c.query("SELECT id,status,created_by FROM budgets WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
+      if(!r.rowCount||r.rows[0].status!=='draft')throw Object.assign(new Error('Only a draft budget can be approved.'),{statusCode:409});
+      if(r.rows[0].created_by&&String(r.rows[0].created_by)===auth.userId)throw Object.assign(new Error('The budget creator cannot approve their own budget.'),{statusCode:403});
+      await c.query("UPDATE budgets SET status='approved',approved_by=$3,approved_at=now() WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data,auth.userId]);
+      await audit(c,auth.schoolId,auth.userId,'budget.approve','budget',id.data);
+      return {id:id.data,status:'approved'};
+    });
+    res.json({budget});
+  }catch(error){if(!handleError(res,error))throw error;}
+}));
+
+operationsRouter.get('/reports/trial-balance',requirePermission('reports.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);const dates=reportDateFilters(req,res);if(!dates)return;
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    `SELECT a.id,a.code,a.name,a.account_type,
+      COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.debit ELSE 0 END),0)::text AS debit,
+      COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.credit ELSE 0 END),0)::text AS credit,
+      COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.debit-l.credit ELSE 0 END),0)::text AS net
+     FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
+     LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
+       AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+     WHERE a.school_id=$1 AND a.is_active=true
+     GROUP BY a.id ORDER BY a.code`,[auth.schoolId,dates.from,dates.to]));
+  const rows=result.rows.map(r=>({...r,debit:r.debit??'0.00',credit:r.credit??'0.00',net:r.net??'0.00'}));
+  const totals=rows.reduce((acc,r)=>({debit:acc.debit+parseKesToMinorUnits(String(r.debit)),credit:acc.credit+parseKesToMinorUnits(String(r.credit))}),{debit:0n,credit:0n});
+  res.json({report:'trial-balance',currency:'KES',from:dates.from,to:dates.to,rows,totals:{debit:amountString(totals.debit),credit:amountString(totals.credit),balanced:totals.debit===totals.credit}});
+}));
+
+operationsRouter.get('/reports/income-statement',requirePermission('reports.read'),wrap(async(req,res)=>{
+  const auth=authContext(req);const dates=reportDateFilters(req,res);if(!dates)return;
+  const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
+    `SELECT a.code,a.name,a.account_type,
+      COALESCE(sum(CASE WHEN j.id IS NOT NULL THEN l.credit-l.debit ELSE 0 END),0)::text AS balance
+     FROM accounts a LEFT JOIN journal_lines l ON l.school_id=a.school_id AND l.account_id=a.id
+     LEFT JOIN journal_entries j ON j.school_id=l.school_id AND j.id=l.journal_entry_id AND j.status='posted'
+       AND ($2::date IS NULL OR j.posting_date >= $2::date) AND ($3::date IS NULL OR j.posting_date <= $3::date)
+     WHERE a.school_id=$1 AND a.account_type IN ('income','expense')
+     GROUP BY a.id ORDER BY a.account_type,a.code`,[auth.schoolId,dates.from,dates.to]));
+  const signedMinor=(value:unknown):bigint=>{const raw=String(value??'0.00');const negative=raw.startsWith('-');const parsed=parseKesToMinorUnits(negative?raw.slice(1):raw);return negative?-parsed:parsed;};
+  const rows=result.rows.map(r=>({...r,balance:amountString(r.account_type==='expense'?-signedMinor(r.balance):signedMinor(r.balance))}));
+  let incomeMinor=0n;let expensesMinor=0n;
+  for(const row of rows){const amount=signedMinor(row.balance);if(row.account_type==='income')incomeMinor+=amount;else expensesMinor+=amount;}
+  res.json({report:'income-statement',currency:'KES',from:dates.from,to:dates.to,rows,totals:{income:amountString(incomeMinor),expenses:amountString(expensesMinor),surplus:amountString(incomeMinor-expensesMinor)}});
+}));
 
 operationsRouter.get('/budgets',requirePermission('reports.read'),wrap(async(req,res)=>{
   const auth=authContext(req);
@@ -1329,12 +1611,12 @@ operationsRouter.get('/reports/fee-balances',requirePermission('reports.read'),w
     `SELECT s.admission_number,s.full_name,i.invoice_number,i.academic_year,i.due_on,i.amount::text,
       COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)::text AS allocated,
       COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
-      (i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
+      (i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)-COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0))::numeric(14,2)::text AS outstanding
      FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
      LEFT JOIN fee_receipt_allocations a ON a.school_id=i.school_id AND a.invoice_id=i.id
      LEFT JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
-     WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
-     GROUP BY i.id,s.id HAVING i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)>0
+     WHERE i.school_id=$1 AND i.status NOT IN ('void','reversed') AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
+     GROUP BY i.id,s.id HAVING i.amount-COALESCE(sum(a.amount) FILTER (WHERE r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)-COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0)>0
      ORDER BY i.due_on,s.full_name LIMIT 2000`,[auth.schoolId,dates.from,dates.to,academicTermId]));
   res.json({report:'fee-balances',currency:'KES',rows:result.rows});
 }));
@@ -1398,16 +1680,16 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
       sql=`SELECT s.admission_number,s.full_name,i.invoice_number,i.academic_year,i.issued_on,i.due_on,i.amount::text,
        COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
        COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
-       (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
+       (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)-COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0))::numeric(14,2)::text AS outstanding
        FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
-       WHERE i.school_id=$1 AND i.status<>'void' AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
+       WHERE i.school_id=$1 AND i.status NOT IN ('void','reversed') AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
        ORDER BY i.due_on,s.full_name LIMIT 5000`;break;
     case 'fee-aging':
       sql=`SELECT s.admission_number,s.full_name,i.invoice_number,i.due_on,
        (CURRENT_DATE-i.due_on)::int AS days_overdue,
-       (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2)::text AS outstanding
+       (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)-COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0))::numeric(14,2)::text AS outstanding
        FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id
-       WHERE i.school_id=$1 AND i.status<>'void' AND i.due_on<CURRENT_DATE AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
+       WHERE i.school_id=$1 AND i.status NOT IN ('void','reversed') AND i.due_on<CURRENT_DATE AND ($2::date IS NULL OR i.issued_on >= $2::date) AND ($3::date IS NULL OR i.issued_on <= $3::date) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$4::uuid))
        ORDER BY i.due_on,s.full_name LIMIT 5000`;break;
     case 'expense-register':
       sql=`SELECT e.expense_number,e.incurred_on,e.category,e.description,e.amount::text,e.status,s.name AS supplier
@@ -1444,7 +1726,7 @@ async function buildReportRows(c:PoolClient,schoolId:string,name:string,from:str
     case 'fees-by-class':
       sql=`SELECT COALESCE(s.class_name,'Unassigned') AS class_name,count(DISTINCT CASE WHEN $2::uuid IS NULL THEN s.id ELSE i.student_id END)::int AS students,
        COALESCE(sum(i.amount),0)::text AS invoiced
-       FROM students s LEFT JOIN fee_invoices i ON i.school_id=s.school_id AND i.student_id=s.id AND i.status<>'void' AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$2::uuid))
+       FROM students s LEFT JOIN fee_invoices i ON i.school_id=s.school_id AND i.student_id=s.id AND i.status NOT IN ('void','reversed') AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM fee_structures fs WHERE fs.school_id=i.school_id AND fs.id=i.fee_structure_id AND fs.academic_term_id=$2::uuid))
        WHERE s.school_id=$1 GROUP BY s.class_name ORDER BY s.class_name`;break;
     case 'audit-trail':
       sql=`SELECT created_at,actor_user_id,action,entity_type,entity_id,request_id,metadata

@@ -1,0 +1,60 @@
+name: Fees and Receipts Review Verification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - feature/precious-schoolbooks-fees-receipts-review
+      - feature/precious-schoolbooks-fees-receipts-final
+      - feature/precious-schoolbooks-fees-receipts-production-ready
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: shuleledger
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d shuleledger"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://shuleledger_app:app-password@localhost:5432/shuleledger
+      MIGRATIONS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/shuleledger
+      BOOTSTRAP_TOKEN: ci-bootstrap-token-not-for-production
+      RUNTIME_DATABASE_PASSWORD: app-password-for-ci-only-0001
+      SHULELEDGER_ROLE_SETUP_ONLY: 'true'
+      NODE_ENV: test
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install
+      - name: Create least-privilege runtime role
+        run: psql "$MIGRATIONS_DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE shuleledger_app LOGIN PASSWORD 'app-password' NOSUPERUSER NOBYPASSRLS;"
+      - name: Apply database migrations
+        run: npm run db:migrate
+      - name: Verify runtime role and grants
+        run: node scripts/start-render.mjs
+      - name: Type-check frontend and API
+        run: npm run typecheck
+      - name: Run tests
+        run: npm test
+      - name: Build production application
+        run: npm run build
