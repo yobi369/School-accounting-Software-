@@ -1435,7 +1435,18 @@ operationsRouter.post('/accounting/years/:id/close',requirePermission('periods.m
 }));
 
 function todayIso(){return new Date().toISOString().slice(0,10);}
-async function nextFeeDocumentNumber(c:PoolClient,schoolId:string,prefix:'INV'|'RCT',date:string):Promise<string>{const year=date.slice(0,4);const table=prefix==='INV'?'fee_invoices':'fee_receipts';const column=prefix==='INV'?'invoice_number':'receipt_number';const lockKey=`fee-number:${schoolId}:${prefix}:${year}`;await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[lockKey]);const base=`${prefix}-${year}-`;const result=await c.query(`SELECT COALESCE(MAX(CASE WHEN substring(${column} from $3) ~ '^[0-9]+
+async function nextFeeDocumentNumber(c:PoolClient,schoolId:string,prefix:'INV'|'RCT',date:string):Promise<string>{
+  const year=date.slice(0,4);
+  const table=prefix==='INV'?'fee_invoices':'fee_receipts';
+  const column=prefix==='INV'?'invoice_number':'receipt_number';
+  const lockKey='fee-number:'+schoolId+':'+prefix+':'+year;
+  await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[lockKey]);
+  const base=prefix+'-'+year+'-';
+  const query="SELECT COALESCE(MAX(CASE WHEN substring("+column+" from $3) ~ '^[0-9]+$' THEN substring("+column+" from $3)::bigint END),0) AS sequence FROM "+table+" WHERE school_id=$1 AND "+column+" LIKE $2";
+  const result=await c.query(query,[schoolId,base+'%',base.length+1]);
+  const next=Number(result.rows[0].sequence)+1;
+  return base+String(next).padStart(6,'0');
+}
 
 operationsRouter.get('/budgets',requirePermission('reports.read'),wrap(async(req,res)=>{
   const auth=authContext(req);
