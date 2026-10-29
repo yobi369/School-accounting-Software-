@@ -195,6 +195,7 @@ operationsRouter.post('/fees/structures',requirePermission('fees.manage'),wrap(a
   if(new Set(items.map(item=>item.itemName.toLowerCase())).size!==items.length){res.status(422).json({error:'Fee item names must be unique within a structure.'});return;}
   try{
     const structure=await withSchoolTransaction(auth.schoolId,async c=>{
+      const configuredClass=await c.query('SELECT id FROM school_classes WHERE school_id=$1 AND name=$2 AND is_active=true',[auth.schoolId,d.className]);if(!configuredClass.rowCount)throw Object.assign(new Error('Choose a class or stream configured under School Settings.'),{statusCode:422});
       const id=randomUUID();
       let academicYear=d.academicYear;
       let termName=d.termName;
