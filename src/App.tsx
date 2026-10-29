@@ -38,6 +38,7 @@ const labels:Record<string,string>={
   posted_count:'Posted journals',awaiting_approval:'Awaiting approval',approved_unpaid:'Approved unpaid',
   collected:'Fees collected',unmatched:'Unmatched lines',paid_total:'Expenses paid',
 };
+const formatTableValue=(key:string,value:unknown):string=>{if(value===null||value===undefined)return '—';if(typeof value==='string'&&/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)?$/.test(value)){const date=new Date(value);if(!Number.isNaN(date.getTime()))return new Intl.DateTimeFormat('en-KE',{day:'2-digit',month:'short',year:'numeric',...(value.includes('T')?{hour:'2-digit',minute:'2-digit',hour12:true,timeZone:'Africa/Nairobi'}:{timeZone:'Africa/Nairobi'})}).format(date);}return human(value);};
 const human=(value:unknown):string=>{
   if(value===null||value===undefined)return '—';
   if(typeof value==='object')return JSON.stringify(value);
@@ -63,8 +64,8 @@ function DynamicForm({title,fields,submitLabel='Save',onSubmit}:{title:string;fi
 }
 function DataTable({rows,empty='No records yet.'}:{rows:Row[];empty?:string}){
   if(!rows.length)return <div className="sl-empty">{empty}</div>;
-  const keys=Object.keys(rows[0]).filter(k=>!['password_hash','token_hash','metadata','response_body','request_hash'].includes(k));
-  return <div className="sl-table-wrap"><table className="sl-table"><thead><tr>{keys.map(k=><th key={k}>{labels[k]??k.replaceAll('_',' ')}</th>)}</tr></thead><tbody>{rows.map((row,i)=><tr key={String(row.id??row.invoice_number??row.receipt_number??i)}>{keys.map(k=><td key={k}>{human(row[k])}</td>)}</tr>)}</tbody></table></div>;
+  const keys=Object.keys(rows[0]).filter(k=>!['id','student_id','invoice_id','journal_entry_id','academic_term_id','school_id','fee_structure_id','password_hash','token_hash','metadata','response_body','request_hash'].includes(k));
+  return <div className="sl-table-wrap"><table className="sl-table"><thead><tr>{keys.map(k=><th key={k}>{labels[k]??k.replaceAll('_',' ')}</th>)}</tr></thead><tbody>{rows.map((row,i)=><tr key={String(row.id??row.invoice_number??row.receipt_number??i)}>{keys.map(k=><td key={k}>{formatTableValue(k,row[k])}</td>)}</tr>)}</tbody></table></div>;
 }
 function StudentProfileEditor({session,profile,onSaved}:{session:SchoolSession;profile:Row;onSaved:()=>Promise<void>}){
   const fieldNames=['admission_number','full_name','class_name','sex','date_of_birth','guardian_name','guardian_relationship','guardian_phone','guardian_alternate_phone','home_address','emergency_contact_name','emergency_contact_phone'] as const;
@@ -173,7 +174,7 @@ function Workspace({session,onLogout,onSwitch}:{session:SchoolSession;onLogout:(
   const [selectedStudentId,setSelectedStudentId]=useState('');
   const [selectedAcademicTermId,setSelectedAcademicTermId]=useState('');
   const [selectedDashboardTermId,setSelectedDashboardTermId]=useState('');
-  const [selectedFeeTermId,setSelectedFeeTermId]=useState('');
+  const [selectedFeeTermId,setSelectedFeeTermId]=useState('');const [feesTab,setFeesTab]=useState<'structures'|'invoices'|'payments'|'balances'|'waivers'>('structures');
   const [selectedStatementTermId,setSelectedStatementTermId]=useState('');
   const [studentAccount,setStudentAccount]=useState<Record<string,unknown>|null>(null);
   const load=useCallback(async(page:string)=>{
@@ -211,7 +212,7 @@ function Workspace({session,onLogout,onSwitch}:{session:SchoolSession;onLogout:(
   const students=rows('students');const invoices=rows('invoices');const accounts=rows('accounts');const expenses=rows('expenses');const periods=rows('periods');const banks=rows('accounts');const users=rows('users');const journals=rows('journals');const events=rows('events');const waivers=rows('waivers');const receipts=rows('receipts');const structures=rows('structures');const suppliers=rows('suppliers');const budgets=rows('budgets');const payrollStaff=rows('staff');const payrollRuns=rows('payrollRuns');const academicYears=rows('academicYears');const statementLines=rows('statementLines');const journalLineRows=rows('journalLines');const roles=rows('roles');const permissions=rows('permissions');
   const accountRows=active==='bank'?rows('ledgerAccounts'):accounts;
   const accountOptions=accountRows.map(a=>({label:`${human(a.code)} — ${human(a.name)} (${human(a.account_type)})`,value:String(a.id)}));
-  const studentOptions=students.map(s=>({label:`${human(s.admission_number)} — ${human(s.full_name)}`,value:String(s.id)}));
+  const studentOptions=students.map(s=>({label:`${human(s.admission_number)} — ${human(s.full_name)} · ${human(s.class_name)} · Balance KES ${invoices.filter(i=>String(i.student_id)===String(s.id)&&!['reversed','void'].includes(String(i.status))).reduce((sum,i)=>sum+Math.max(0,Number(i.outstanding??i.amount??0)),0).toLocaleString('en-KE')}`,value:String(s.id)}));
   const academicTermOptions=academicYears.filter(y=>y.status==='open').flatMap(y=>(Array.isArray(y.terms)?y.terms as Row[]:[]).filter(t=>t.status==='open').map(t=>({label:`${human(y.name)} · ${human(t.name)} (${human(t.starts_on)} to ${human(t.ends_on)})`,value:String(t.id)})));
   const reportAcademicTermOptions=academicYears.flatMap(y=>(Array.isArray(y.terms)?y.terms as Row[]:[]).map(t=>({label:`${human(y.name)} · ${human(t.name)} (${human(t.starts_on)} to ${human(t.ends_on)})${t.status==='closed'?' · closed':''}`,value:String(t.id)})));
   const invoiceOptions=invoices.map(i=>({label:`${human(i.invoice_number)} — ${human(i.student_name)} — Outstanding KES ${human(i.outstanding??i.amount)}`,value:String(i.id)}));
