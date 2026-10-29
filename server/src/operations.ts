@@ -182,7 +182,7 @@ const feeStructureSchema=z.object({
 operationsRouter.get('/fees/structures',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
-    "SELECT f.id,f.class_name,f.academic_year,f.term_name,f.academic_term_id,f.due_on,f.status,f.created_at,COALESCE(json_agg(json_build_object('id',i.id,'itemName',i.item_name,'amount',i.amount::text)) FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS items,COALESCE((SELECT count(*)::int FROM fee_invoices inv WHERE inv.school_id=f.school_id AND inv.fee_structure_id=f.id),0) AS invoices_created,COALESCE((SELECT sum(fi.amount) FROM fee_structure_items fi WHERE fi.school_id=f.school_id AND fi.structure_id=f.id),0)::numeric(14,2)::text AS total_fees,(SELECT count(*)::int FROM students st WHERE st.school_id=f.school_id AND st.class_name=f.class_name AND st.status='active') AS eligible_students FROM fee_structures f LEFT JOIN fee_structure_items i ON i.school_id=f.school_id AND i.structure_id=f.id WHERE f.school_id=$1 GROUP BY f.id ORDER BY f.academic_year DESC,f.term_name,f.class_name",
+    "SELECT f.id,f.class_name,f.academic_year,f.term_name,f.academic_term_id,f.version,f.due_on,f.status,f.created_at,COALESCE(json_agg(json_build_object('id',i.id,'itemName',i.item_name,'amount',i.amount::text)) FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS items,COALESCE((SELECT count(*)::int FROM fee_invoices inv WHERE inv.school_id=f.school_id AND inv.fee_structure_id=f.id),0) AS invoices_created,COALESCE((SELECT sum(fi.amount) FROM fee_structure_items fi WHERE fi.school_id=f.school_id AND fi.structure_id=f.id),0)::numeric(14,2)::text AS total_fees,(SELECT count(*)::int FROM students st WHERE st.school_id=f.school_id AND st.class_name=f.class_name AND st.status='active') AS eligible_students FROM fee_structures f LEFT JOIN fee_structure_items i ON i.school_id=f.school_id AND i.structure_id=f.id WHERE f.school_id=$1 GROUP BY f.id ORDER BY f.academic_year DESC,f.term_name,f.class_name",
     [auth.schoolId]));
   res.json({structures:result.rows});
 }));
@@ -211,10 +211,11 @@ operationsRouter.post('/fees/structures',requirePermission('fees.manage'),wrap(a
         if(d.dueOn<start||d.dueOn>end)throw Object.assign(new Error('The fee due date must fall within the selected academic term.'),{statusCode:422});
         academicYear=String(t.year_name);termName=String(t.term_name);
       }
-      await c.query("INSERT INTO fee_structures (id,school_id,class_name,academic_year,term_name,academic_term_id,due_on,status,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8)",[id,auth.schoolId,d.className,academicYear,termName,d.academicTermId??null,d.dueOn,auth.userId]);
+      const versionResult=await c.query('SELECT COALESCE(MAX(version),0)+1 AS version FROM fee_structures WHERE school_id=$1 AND class_name=$2 AND academic_term_id IS NOT DISTINCT FROM $3',[auth.schoolId,d.className,d.academicTermId??null]);const version=Number(versionResult.rows[0].version);
+      await c.query("INSERT INTO fee_structures (id,school_id,class_name,academic_year,term_name,academic_term_id,version,due_on,status,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'draft',$9)",[id,auth.schoolId,d.className,academicYear,termName,d.academicTermId??null,version,d.dueOn,auth.userId]);
       for(const item of items)await c.query("INSERT INTO fee_structure_items (id,school_id,structure_id,item_name,amount) VALUES ($1,$2,$3,$4,$5)",[randomUUID(),auth.schoolId,id,item.itemName,amountString(item.minor)]);
       await audit(c,auth.schoolId,auth.userId,'fee.structure.create','fee_structure',id,{className:d.className,academicYear,termName,academicTermId:d.academicTermId??null,itemCount:items.length});
-      return {id,className:d.className,academicYear,termName,academicTermId:d.academicTermId??null,dueOn:d.dueOn,status:'draft',items:items.map(item=>({itemName:item.itemName,amount:amountString(item.minor)}))};
+      return {id,className:d.className,academicYear,termName,academicTermId:d.academicTermId??null,version,dueOn:d.dueOn,status:'draft',items:items.map(item=>({itemName:item.itemName,amount:amountString(item.minor)}))};
     });
     res.status(201).json({structure});
   }catch(error){if(!handleError(res,error))throw error;}
@@ -269,7 +270,7 @@ operationsRouter.post('/fees/structures/:id/invoice-class',requirePermission('fe
       if(!students.rowCount)throw Object.assign(new Error('No active students found in the selected class.'),{statusCode:422});
       const created=[];const skipped=[];
       for(const student of students.rows){
-        const existing=await c.query("SELECT id,invoice_number FROM fee_invoices WHERE school_id=$1 AND student_id=$2 AND fee_structure_id=$3",[auth.schoolId,student.id,id.data]);
+        const existing=await c.query("SELECT i.id,i.invoice_number FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND (i.fee_structure_id=$3 OR ($5::uuid IS NOT NULL AND EXISTS (SELECT 1 FROM fee_structures prior WHERE prior.school_id=i.school_id AND prior.id=i.fee_structure_id AND prior.class_name=$4 AND prior.academic_term_id=$5)))",[auth.schoolId,student.id,id.data,f.class_name,f.academic_term_id]);
         if(existing.rowCount){skipped.push({studentId:student.id,invoiceNumber:existing.rows[0].invoice_number});continue;}
         const invoiceId=randomUUID();
         const invoiceNumber=await nextFeeDocumentNumber(c,auth.schoolId,'INV',issuedOn);
