@@ -1193,7 +1193,7 @@ operationsRouter.post('/fees/credits/allocations/:allocationId/reverse',requireP
   await audit(client,auth.schoolId,auth.userId,'student.fee_credit.allocation.reverse','student_fee_credit_allocation',id.data,{creditId:row.credit_id,invoiceId:row.invoice_id,reason:body.data.reason});return {id:id.data,status:'reversed',reason:body.data.reason};
  });res.json({allocation:result});}catch(error){if(!handleError(res,error))throw error;}
 }));
-const waiverSchema=z.object({invoiceId:z.string().uuid(),waiverNumber:z.string().trim().min(1).max(60),adjustmentType:z.enum(['waiver','scholarship','discount','correction','credit_adjustment']).default('waiver'),amount:z.string(),reason:z.string().trim().min(3).max(500),waivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()});
+const waiverSchema=z.object({invoiceId:z.string().uuid(),waiverNumber:z.string().trim().min(1).max(60),adjustmentType:z.enum(['waiver','scholarship','discount','correction','credit_adjustment']).default('waiver'),amount:z.string().regex(/^\d+(?:\.\d{1,2})?$/),reason:z.string().trim().min(3).max(500),waivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()});
 operationsRouter.get('/fees/waivers',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);const r=await withSchoolTransaction(auth.schoolId,c=>c.query(
     'SELECT w.id,w.waiver_number,w.adjustment_type,w.invoice_id,i.invoice_number,w.amount::text,w.reason,w.waived_on,w.status,w.created_by,w.approved_by,w.approved_at,w.rejection_reason,w.rejected_by,w.rejected_at,w.journal_entry_id FROM fee_waivers w JOIN fee_invoices i ON i.id=w.invoice_id AND i.school_id=w.school_id WHERE w.school_id=$1 ORDER BY w.created_at DESC LIMIT 500',[auth.schoolId]));
