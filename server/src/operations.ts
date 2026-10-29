@@ -1021,6 +1021,92 @@ operationsRouter.post('/suppliers',requirePermission('expenses.create'),wrap(asy
   res.status(201).json({supplier});
 }));
 
+operationsRouter.get('/fees/arrears',requirePermission('fees.read'),wrap(async(req,res)=>{
+ const auth=authContext(req);const academicTermId=reportAcademicTermFilter(req,res);if(academicTermId===undefined)return;
+ const result=await withSchoolTransaction(auth.schoolId,client=>client.query(
+  `WITH invoice_balances AS (
+    SELECT i.id,i.student_id,i.due_on,
+      (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)
+       -COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0))::numeric(14,2) AS balance
+    FROM fee_invoices i LEFT JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
+    WHERE i.school_id=$1 AND i.status NOT IN ('void','reversed') AND ($2::uuid IS NULL OR fs.academic_term_id=$2::uuid)
+  ), aged AS (
+    SELECT *,CASE WHEN due_on>=current_date THEN 0 ELSE current_date-due_on END AS days_overdue FROM invoice_balances WHERE balance>0
+  )
+  SELECT s.full_name AS student_name,s.admission_number,s.class_name,
+    COALESCE(sum(a.balance) FILTER (WHERE a.days_overdue=0),0)::numeric(14,2)::text AS current,
+    COALESCE(sum(a.balance) FILTER (WHERE a.days_overdue BETWEEN 1 AND 30),0)::numeric(14,2)::text AS days_1_30,
+    COALESCE(sum(a.balance) FILTER (WHERE a.days_overdue BETWEEN 31 AND 60),0)::numeric(14,2)::text AS days_31_60,
+    COALESCE(sum(a.balance) FILTER (WHERE a.days_overdue BETWEEN 61 AND 90),0)::numeric(14,2)::text AS days_61_90,
+    COALESCE(sum(a.balance) FILTER (WHERE a.days_overdue>90),0)::numeric(14,2)::text AS days_over_90,
+    COALESCE(sum(a.balance),0)::numeric(14,2)::text AS total_outstanding
+  FROM aged a JOIN students s ON s.school_id=$1 AND s.id=a.student_id
+  GROUP BY s.id,s.full_name,s.admission_number,s.class_name
+  HAVING sum(a.balance)>0 ORDER BY sum(a.balance) DESC,s.full_name LIMIT 5000`,[auth.schoolId,academicTermId]));
+ res.json({arrears:result.rows});
+}));
+operationsRouter.get('/fees/statements/:studentId',requirePermission('fees.read'),wrap(async(req,res)=>{
+ const id=z.string().uuid().safeParse(req.params.studentId);if(!id.success){res.status(400).json({error:'Invalid student ID.'});return;}
+ const dates=reportDateFilters(req,res);if(!dates)return;const auth=authContext(req);
+ const result=await withSchoolTransaction(auth.schoolId,async client=>{
+  const student=await client.query('SELECT id,admission_number,full_name,class_name FROM students WHERE school_id=$1 AND id=$2',[auth.schoolId,id.data]);
+  if(!student.rowCount)throw Object.assign(new Error('Student not found in this school.'),{statusCode:404});
+  const rows=await client.query(
+   `WITH transactions AS (
+     SELECT i.issued_on AS transaction_date,'Invoice'::text AS transaction_type,i.invoice_number AS reference,i.description,
+       i.amount::numeric(14,2) AS debit,0::numeric(14,2) AS credit,1 AS sort_order
+     FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2
+     UNION ALL
+     SELECT r.received_on,'Payment',r.receipt_number,'Payment allocated to invoice '||i.invoice_number,
+       0::numeric(14,2),a.amount::numeric(14,2),2
+     FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id
+     JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+     WHERE a.school_id=$1 AND i.student_id=$2
+     UNION ALL
+     SELECT w.waived_on,'Waiver / adjustment',w.waiver_number,w.reason,0::numeric(14,2),w.amount::numeric(14,2),3
+     FROM fee_waivers w JOIN fee_invoices i ON i.school_id=w.school_id AND i.id=w.invoice_id
+     WHERE w.school_id=$1 AND i.student_id=$2 AND w.status IN ('posted','reversed')
+     UNION ALL
+     SELECT rev.posting_date,'Reversal',r.receipt_number,'Reversal of receipt allocation for invoice '||i.invoice_number,
+       a.amount::numeric(14,2),0::numeric(14,2),4
+     FROM fee_receipts r JOIN fee_receipt_allocations a ON a.school_id=r.school_id AND a.receipt_id=r.id
+     JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id
+     JOIN journal_entries rev ON rev.school_id=r.school_id AND rev.reversal_of_id=r.journal_entry_id AND rev.status='posted'
+     WHERE r.school_id=$1 AND i.student_id=$2 AND r.status='reversed'
+     UNION ALL
+     SELECT rev.posting_date,'Reversal',i.invoice_number,'Reversal of invoice '||i.invoice_number,
+       0::numeric(14,2),i.amount::numeric(14,2),4
+     FROM fee_invoices i JOIN journal_entries original ON original.school_id=i.school_id AND original.source_type='fee_invoice' AND original.source_id=i.id
+     JOIN journal_entries rev ON rev.school_id=original.school_id AND rev.reversal_of_id=original.id AND rev.status='posted'
+     WHERE i.school_id=$1 AND i.student_id=$2 AND i.status IN ('void','reversed')
+     UNION ALL
+     SELECT rev.posting_date,'Reversal',w.waiver_number,'Reversal of waiver '||w.waiver_number,
+       w.amount::numeric(14,2),0::numeric(14,2),4
+     FROM fee_waivers w JOIN fee_invoices i ON i.school_id=w.school_id AND i.id=w.invoice_id
+     JOIN journal_entries original ON original.school_id=w.school_id AND original.source_type='fee_waiver' AND original.source_id=w.id
+     JOIN journal_entries rev ON rev.school_id=original.school_id AND rev.reversal_of_id=original.id AND rev.status='posted'
+     WHERE w.school_id=$1 AND i.student_id=$2
+   ), opening AS (
+     SELECT COALESCE(sum(debit-credit) FILTER (WHERE ($3::date IS NOT NULL AND transaction_date<$3::date)),0)::numeric(14,2) AS balance FROM transactions
+   ), filtered AS (
+     SELECT * FROM transactions WHERE ($3::date IS NULL OR transaction_date >= $3::date) AND ($4::date IS NULL OR transaction_date <= $4::date)
+   )
+   SELECT transaction_date,transaction_type,reference,description,debit::text,credit::text,
+     (SELECT balance FROM opening)+sum(debit-credit) OVER (ORDER BY transaction_date,sort_order,reference ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::numeric(14,2)::text AS running_balance
+   FROM filtered ORDER BY transaction_date,sort_order,reference LIMIT 10000`,
+   [auth.schoolId,id.data,dates.from,dates.to]);
+  const opening=await client.query(
+   `WITH tx AS (
+     SELECT i.issued_on AS d,i.amount AS delta FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2
+     UNION ALL SELECT r.received_on,-a.amount FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id WHERE a.school_id=$1 AND i.student_id=$2
+     UNION ALL SELECT w.waived_on,-w.amount FROM fee_waivers w JOIN fee_invoices i ON i.school_id=w.school_id AND i.id=w.invoice_id WHERE w.school_id=$1 AND i.student_id=$2 AND w.status IN ('posted','reversed')
+     UNION ALL SELECT rev.posting_date,a.amount FROM fee_receipts r JOIN fee_receipt_allocations a ON a.school_id=r.school_id AND a.receipt_id=r.id JOIN fee_invoices i ON i.school_id=a.school_id AND i.id=a.invoice_id JOIN journal_entries rev ON rev.school_id=r.school_id AND rev.reversal_of_id=r.journal_entry_id AND rev.status='posted' WHERE r.school_id=$1 AND i.student_id=$2 AND r.status='reversed'
+   ) SELECT COALESCE(sum(delta) FILTER (WHERE ($3::date IS NOT NULL AND d<$3::date)),0)::numeric(14,2)::text AS opening_balance FROM tx`,
+   [auth.schoolId,id.data,dates.from]);
+  return {student:student.rows[0],openingBalance:opening.rows[0].opening_balance,transactions:rows.rows,from:dates.from,to:dates.to};
+ });
+ res.json({statement:result});
+}));
 const waiverSchema=z.object({invoiceId:z.string().uuid(),waiverNumber:z.string().trim().min(1).max(60),amount:z.string(),reason:z.string().trim().min(3).max(500),waivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()});
 operationsRouter.get('/fees/waivers',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);const r=await withSchoolTransaction(auth.schoolId,c=>c.query(
