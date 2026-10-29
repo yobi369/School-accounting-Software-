@@ -52,4 +52,4 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shuleledger_app') THEN
     EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON school_classes, school_fee_items TO shuleledger_app';
   END IF;
-END $;
+END $grant$;
