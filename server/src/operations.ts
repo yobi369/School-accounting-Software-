@@ -275,6 +275,7 @@ operationsRouter.post('/fees/structures/:id/invoice-class',requirePermission('fe
         const invoiceNumber=await nextFeeDocumentNumber(c,auth.schoolId,'INV',issuedOn);
         const description=items.rows.map(item=>String(item.item_name)).join(', ');
         await c.query("INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,issued_on,due_on,amount,status,created_by,fee_structure_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'issued',$10,$11)",[invoiceId,auth.schoolId,student.id,invoiceNumber,f.academic_year,description,issuedOn,f.due_on,amountString(total),auth.userId,id.data]);
+        for(let itemIndex=0;itemIndex<items.rows.length;itemIndex++){const item=items.rows[itemIndex];await c.query('INSERT INTO fee_invoice_items (id,school_id,invoice_id,line_number,item_name,description,amount) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),auth.schoolId,invoiceId,itemIndex+1,String(item.item_name),'',String(item.amount)]);}
         const journal=await postJournal(c,auth.schoolId,auth.userId,issuedOn,'Bulk fee invoice '+invoiceNumber+': '+description,'fee_invoice',invoiceId,[
           {accountCode:'1200',debit:amountString(total),credit:'0.00'},
           {accountCode:'4000',debit:'0.00',credit:amountString(total)},
