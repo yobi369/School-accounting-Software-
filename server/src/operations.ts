@@ -343,7 +343,7 @@ operationsRouter.get('/fees/receipts',requirePermission('fees.read'),wrap(async(
   const auth=authContext(req);
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
     `SELECT r.id,r.receipt_number,r.student_id,s.admission_number,s.full_name AS student_name,s.class_name,
-      r.received_on,r.amount::text,r.previous_balance::text,r.new_balance::text,r.payment_method,r.external_reference,r.notes,r.status,
+      r.received_on,r.amount::text,r.previous_balance::text,r.new_balance::text,COALESCE((SELECT cr.amount::text FROM student_fee_credits cr WHERE cr.school_id=r.school_id AND cr.receipt_id=r.id),'0.00') AS student_credit_amount,r.payment_method,r.external_reference,r.notes,r.status,
       r.journal_entry_id,r.received_by,u.full_name AS received_by_name,r.created_at,$2::text AS school_name,
       COALESCE(json_agg(json_build_object('invoiceNumber',i.invoice_number,'academicYear',i.academic_year,'termName',COALESCE(fs.term_name,i.academic_year),'amount',a.amount::text))
         FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS allocations
