@@ -16,6 +16,7 @@ export type ReceiptRow = {
   previous_balance?: string | number | null;
   new_balance?: string | number | null;
   received_by_name?: string | null;
+  student_credit_amount?: string | number | null;
   allocations?: ReceiptAllocation[] | string;
 };
 
@@ -74,7 +75,7 @@ export function ReceiptPrintButton({ receipt }: { receipt: ReceiptRow }): ReactE
       <title>Receipt ${escapeHtml(receipt.receipt_number)}</title>
       <style>
         body{font:14px/1.5 Arial,sans-serif;color:#17211d;margin:32px auto;max-width:720px;padding:0 20px}
-        header{text-align:center;border-bottom:2px solid #245d4c;padding-bottom:16px;margin-bottom:20px}
+        header{text-align:center;border-bottom:2px solid #245d4c;padding-bottom:16px;margin-bottom:20px}.brandmark{display:inline-grid;place-items:center;width:48px;height:48px;border-radius:12px;background:#245d4c;color:#fff;font-weight:800;letter-spacing:.04em;margin-bottom:8px}
         h1{font-size:24px;margin:0 0 5px}h2{font-size:18px;margin:0}
         .muted{color:#5a6861}.status{padding:6px 10px;border:1px solid #888;display:inline-block;margin-top:10px}
         .details{display:grid;grid-template-columns:1fr 1fr;gap:10px 24px;margin:20px 0}
@@ -86,7 +87,7 @@ export function ReceiptPrintButton({ receipt }: { receipt: ReceiptRow }): ReactE
         .notice{border:1px solid #a66;padding:10px;margin:12px 0;color:#8a3030}
         @media print{body{margin:0 auto;padding:0 8mm}.no-print{display:none}}
       </style></head><body>
-      <header><h1>${escapeHtml(receipt.school_name || 'School')}</h1><p class="muted">Official Fee Receipt</p><h2>Receipt No. ${escapeHtml(receipt.receipt_number)}</h2>
+      <header><div class="brandmark" aria-label="Precious SchoolBooks mark">PSB</div><h1>${escapeHtml(receipt.school_name || 'School')}</h1><p class="muted">Official Fee Receipt</p><h2>Receipt No. ${escapeHtml(receipt.receipt_number)}</h2>
       ${reversed ? '<div class="status">REVERSED — NOT VALID AS PROOF OF CURRENT PAYMENT</div>' : '<div class="status">POSTED</div>'}</header>
       ${reversed ? '<p class="notice">This receipt has been reversed. Retain this copy for the audit trail; it does not represent an active payment.</p>' : ''}
       <section class="details">
@@ -105,6 +106,7 @@ export function ReceiptPrintButton({ receipt }: { receipt: ReceiptRow }): ReactE
       </tbody></table>
       <p><strong>Amount in words:</strong> ${escapeHtml(amountInWords(receipt.amount))}</p>
       <div class="total">Amount paid: ${escapeHtml(kes(receipt.amount))}</div>
+      ${Number(receipt.student_credit_amount ?? 0) > 0 ? '<p><strong>Unallocated student credit created:</strong> ' + escapeHtml(kes(receipt.student_credit_amount)) + '</p>' : ''}
       <section class="details"><div><div class="label">Previous balance</div><div class="value">${escapeHtml(kes(receipt.previous_balance))}</div></div><div><div class="label">New balance</div><div class="value">${escapeHtml(kes(receipt.new_balance))}</div></div></section>
       ${receipt.notes ? '<p><strong>Notes:</strong> ' + escapeHtml(receipt.notes) + '</p>' : ''}
       <footer>Generated from the Precious SchoolBooks receipt register. Keep this receipt for your records.<br>Use the browser print dialog to print or save as PDF.</footer>
