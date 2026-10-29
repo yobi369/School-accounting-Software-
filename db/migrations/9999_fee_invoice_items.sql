@@ -17,4 +17,9 @@ ALTER TABLE fee_invoice_items FORCE ROW LEVEL SECURITY;
 CREATE POLICY fee_invoice_items_school_isolation ON fee_invoice_items
   USING (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid)
   WITH CHECK (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid);
-GRANT SELECT, INSERT, UPDATE, DELETE ON fee_invoice_items TO shuleledger_app;
+DO $role_grants$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shuleledger_app') THEN
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON fee_invoice_items TO shuleledger_app;';
+  END IF;
+END $role_grants$;
