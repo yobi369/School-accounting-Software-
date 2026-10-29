@@ -46,7 +46,7 @@ ALTER TABLE school_fee_items FORCE ROW LEVEL SECURITY;
 CREATE POLICY school_fee_items_school_isolation ON school_fee_items
   USING (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid)
   WITH CHECK (school_id = NULLIF(current_setting('app.school_id', true), '')::uuid);
-DO $
+DO $grant$
 BEGIN
   -- Fresh hosted deployments can run migrations before the runtime role exists.
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shuleledger_app') THEN
