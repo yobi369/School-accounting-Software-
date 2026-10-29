@@ -1246,7 +1246,7 @@ operationsRouter.post('/fees/waivers/:id/approve',requirePermission('fees.manage
       ]);
       await c.query("UPDATE fee_waivers SET status='posted',approved_by=$3,approved_at=now(),journal_entry_id=$4 WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data,auth.userId,journal.id]);
       const total=allocated+waived+credited+amount;
-      await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,w.invoice_id,amountString(total),amountString(allocated)]);
+      await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,w.invoice_id,amountString(total),amountString(total)]);
       await audit(c,auth.schoolId,auth.userId,'fee.waiver.approve','fee_waiver',id.data,{journalEntryId:journal.id,requestedBy:w.created_by});
       return {id:id.data,status:'posted',journalEntryId:journal.id,approvedBy:auth.userId};
     });
@@ -1296,7 +1296,7 @@ operationsRouter.post('/ledger/journals/:id/reverse',requirePermission('ledger.p
           if(settlement.rowCount){
             const total=parseKesToMinorUnits(String(settlement.rows[0].allocated))+parseKesToMinorUnits(String(settlement.rows[0].waived))+parseKesToMinorUnits(String(settlement.rows[0].credited));
             const amount=parseKesToMinorUnits(String(settlement.rows[0].amount));
-            await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,row.invoice_id,amountString(total),String(settlement.rows[0].allocated)]);
+            await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,row.invoice_id,amountString(total),amountString(total)]);
           }
         }
       }
@@ -1310,7 +1310,7 @@ operationsRouter.post('/ledger/journals/:id/reverse',requirePermission('ledger.p
              COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=i.id AND status='posted'),0)::text AS waived,
              COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=$1 AND ca.invoice_id=i.id AND ca.status='posted'),0)::text AS credited
              FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2`,[auth.schoolId,w.rows[0].invoice_id]);
-          if(t.rowCount){const total=parseKesToMinorUnits(String(t.rows[0].allocated))+parseKesToMinorUnits(String(t.rows[0].waived))+parseKesToMinorUnits(String(t.rows[0].credited));await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,w.rows[0].invoice_id,amountString(total),String(t.rows[0].allocated)]);}
+          if(t.rowCount){const total=parseKesToMinorUnits(String(t.rows[0].allocated))+parseKesToMinorUnits(String(t.rows[0].waived))+parseKesToMinorUnits(String(t.rows[0].credited));await c.query("UPDATE fee_invoices SET status=CASE WHEN $3::numeric>=amount THEN 'paid' WHEN $4::numeric>0 THEN 'part_paid' ELSE 'issued' END WHERE school_id=$1 AND id=$2",[auth.schoolId,w.rows[0].invoice_id,amountString(total),amountString(total)]);}
         }
       }
       if(source==='expense_payment'&&sourceId)await c.query("UPDATE expenses SET status='approved',paid_at=NULL,payment_journal_entry_id=NULL WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
