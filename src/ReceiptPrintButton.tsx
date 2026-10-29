@@ -99,7 +99,7 @@ export function ReceiptPrintButton({ receipt }: { receipt: ReceiptRow }): ReactE
         <div><div class="label">Academic year / term</div><div class="value">${escapeHtml([firstAllocation?.academicYear,firstAllocation?.termName].filter(Boolean).join(' · ') || '—')}</div></div>
         <div><div class="label">Payment method</div><div class="value">${escapeHtml(String(receipt.payment_method || '—').toUpperCase())}</div></div>
         <div><div class="label">Transaction reference</div><div class="value">${escapeHtml(receipt.external_reference || '—')}</div></div>
-        <div><div><div class="label">Received by</div><div class="value">${escapeHtml(receipt.received_by_name || '—')}</div></div>
+        <div><div class="label">Received by</div><div class="value">${escapeHtml(receipt.received_by_name || '—')}</div></div>
         <div><div class="label">Status</div><div class="value">${escapeHtml(status.toUpperCase() || 'UNKNOWN')}</div></div>
       </section>
       <table><thead><tr><th>Allocation / invoice</th><th class="right">Amount</th></tr></thead><tbody>
