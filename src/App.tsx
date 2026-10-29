@@ -99,7 +99,7 @@ function StudentStatementAndArrears({session,students,arrears,onNotice,onError}:
 }
 function DataTable({rows,empty='No records yet.'}:{rows:Row[];empty?:string}){
   if(!rows.length)return <div className="sl-empty">{empty}</div>;
-  const keys=Object.keys(rows[0]).filter(k=>!['id','student_id','invoice_id','journal_entry_id','academic_term_id','school_id','fee_structure_id','actor_user_id','entity_id','source_id','account_id','requested_by','approved_by','created_by','received_by','reversal_of_id','matched_journal_line_id','password_hash','token_hash','metadata','response_body','request_hash'].includes(k));
+  const keys=Object.keys(rows[0]).filter(k=>k!=='id'&&!k.endsWith('_id')&&!['password_hash','token_hash','metadata','response_body','request_hash'].includes(k));
   return <div className="sl-table-wrap"><table className="sl-table"><thead><tr>{keys.map(k=><th key={k}>{labels[k]??k.replaceAll('_',' ')}</th>)}</tr></thead><tbody>{rows.map((row,i)=><tr key={String(row.id??row.invoice_number??row.receipt_number??i)}>{keys.map(k=><td key={k}>{formatTableValue(k,row[k])}</td>)}</tr>)}</tbody></table></div>;
 }
 function StudentProfileEditor({session,profile,onSaved,classOptions}:{session:SchoolSession;profile:Row;onSaved:()=>Promise<void>;classOptions:{label:string;value:string}[]}){
