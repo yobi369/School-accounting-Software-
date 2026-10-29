@@ -359,7 +359,7 @@ operationsRouter.get('/fees/receipts',requirePermission('fees.read'),wrap(async(
   res.json({receipts:result.rows});
 }));
 
-const receiptSchema=z.object({
+export const receiptSchema=z.object({
   studentId:z.string().uuid(),receiptNumber:z.string().trim().min(1).max(60).optional(),
   receivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   amount:z.string().regex(/^\d+(?:\.\d{1,2})?$/),paymentAccountId:z.string().uuid(),paymentMethod:z.enum(['cash','bank','mpesa','cheque','other']),
