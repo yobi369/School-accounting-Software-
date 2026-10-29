@@ -1183,7 +1183,7 @@ operationsRouter.post('/fees/credits/:id/allocate',requirePermission('receipts.c
   await audit(client,auth.schoolId,auth.userId,'student.fee_credit.allocate','student_fee_credit_allocation',allocationId,{creditId:id.data,invoiceId:body.data.invoiceId,amount:amountString(amount)});return {id:allocationId,creditId:id.data,invoiceId:body.data.invoiceId,amount:amountString(amount),status:'posted'};
  });res.status(201).json({allocation:result});}catch(error){if(!handleError(res,error))throw error;}
 }));
-operationsRouter.post('/fees/credits/allocations/:allocationId/reverse',requirePermission('receipts.create'),wrap(async(req,res)=>{
+operationsRouter.post('/fees/credits/allocations/:allocationId/reverse',requirePermission('ledger.post'),wrap(async(req,res)=>{
  const id=z.string().uuid().safeParse(req.params.allocationId);const body=z.object({reason:z.string().trim().min(3).max(500)}).safeParse(req.body);if(!id.success||!body.success){res.status(400).json({error:'Provide a credit allocation ID and reversal reason.'});return;}
  const auth=authContext(req);
  try{const result=await withSchoolTransaction(auth.schoolId,async client=>{
