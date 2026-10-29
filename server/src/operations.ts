@@ -273,7 +273,7 @@ operationsRouter.post('/fees/structures/:id/invoice-class',requirePermission('fe
         const existing=await c.query("SELECT i.id,i.invoice_number FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND (i.fee_structure_id=$3 OR ($5::uuid IS NOT NULL AND EXISTS (SELECT 1 FROM fee_structures prior WHERE prior.school_id=i.school_id AND prior.id=i.fee_structure_id AND prior.class_name=$4 AND prior.academic_term_id=$5)))",[auth.schoolId,student.id,id.data,f.class_name,f.academic_term_id]);
         if(existing.rowCount){skipped.push({studentId:student.id,invoiceNumber:existing.rows[0].invoice_number});continue;}
         const invoiceId=randomUUID();
-        const invoiceNumber=await nextFeeDocumentNumber(c,auth.schoolId,'INV',issuedOn);
+        const invoiceSequenceDate=/^\d{4}/.test(String(f.academic_year))?String(f.academic_year).slice(0,4)+'-01-01':issuedOn;const invoiceNumber=await nextFeeDocumentNumber(c,auth.schoolId,'INV',invoiceSequenceDate);
         const description=items.rows.map(item=>String(item.item_name)).join(', ');
         await c.query("INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,issued_on,due_on,amount,status,created_by,fee_structure_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'issued',$10,$11)",[invoiceId,auth.schoolId,student.id,invoiceNumber,f.academic_year,description,issuedOn,f.due_on,amountString(total),auth.userId,id.data]);
         for(let itemIndex=0;itemIndex<items.rows.length;itemIndex++){const item=items.rows[itemIndex];await c.query('INSERT INTO fee_invoice_items (id,school_id,invoice_id,line_number,item_name,description,amount) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),auth.schoolId,invoiceId,itemIndex+1,String(item.item_name),'',String(item.amount)]);}
@@ -323,7 +323,7 @@ operationsRouter.post('/fees/invoices',requirePermission('fees.manage'),wrap(asy
     const invoice=await withSchoolTransaction(auth.schoolId,async c=>{
       const student=await c.query("SELECT id,admission_number,full_name,class_name FROM students WHERE school_id=$1 AND id=$2 AND status='active'",[auth.schoolId,d.studentId]);
       if(!student.rowCount) throw Object.assign(new Error('Active student not found in this school.'),{statusCode:422});
-      const id=randomUUID();const invoiceNumber=d.invoiceNumber??await nextFeeDocumentNumber(c,auth.schoolId,'INV',issuedOn);
+      const id=randomUUID();const invoiceSequenceDate=/^\d{4}/.test(String(d.academicYear))?String(d.academicYear).slice(0,4)+'-01-01':issuedOn;const invoiceNumber=d.invoiceNumber??await nextFeeDocumentNumber(c,auth.schoolId,'INV',invoiceSequenceDate);
       await c.query(
         "INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,issued_on,due_on,amount,status,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'issued',$10)",
         [id,auth.schoolId,d.studentId,invoiceNumber,d.academicYear,description,issuedOn,d.dueOn,amountString(minor),auth.userId]);
