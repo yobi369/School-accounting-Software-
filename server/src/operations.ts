@@ -1208,7 +1208,7 @@ operationsRouter.post('/fees/waivers',requirePermission('fees.manage'),wrap(asyn
   try{
     const waiver=await withSchoolTransaction(auth.schoolId,async c=>{
       const inv=await c.query('SELECT id,amount::text,status FROM fee_invoices WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,d.invoiceId]);
-      if(!inv.rowCount||inv.rows[0].status==='void')throw Object.assign(new Error('Invoice was not found or has been voided.'),{statusCode:422});
+      if(!inv.rowCount||['void','reversed'].includes(String(inv.rows[0].status)))throw Object.assign(new Error('Invoice was not found, voided, or reversed.'),{statusCode:422});
       const settled=await c.query(
         `SELECT COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=$2 AND r.status='posted'),0)::text AS allocated,
          COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived,COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=$1 AND ca.invoice_id=$2 AND ca.status='posted'),0)::text AS credited`,[auth.schoolId,d.invoiceId]);
@@ -1237,7 +1237,7 @@ operationsRouter.post('/fees/waivers/:id/approve',requirePermission('fees.manage
       if(!found.rowCount||found.rows[0].status!=='submitted')throw Object.assign(new Error('Only a submitted waiver can be approved.'),{statusCode:409});
       const w=found.rows[0];if(String(w.created_by)===auth.userId)throw Object.assign(new Error('The requester cannot approve their own fee waiver.'),{statusCode:403});
       const inv=await c.query('SELECT amount::text,status FROM fee_invoices WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,w.invoice_id]);
-      if(!inv.rowCount||inv.rows[0].status==='void')throw Object.assign(new Error('The invoice is no longer available.'),{statusCode:409});
+      if(!inv.rowCount||['void','reversed'].includes(String(inv.rows[0].status)))throw Object.assign(new Error('The invoice is no longer available because it is missing, voided, or reversed.'),{statusCode:409});
       const settled=await c.query(
         `SELECT COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=$1 AND a.invoice_id=$2 AND r.status='posted'),0)::text AS allocated,
          COALESCE((SELECT sum(amount) FROM fee_waivers WHERE school_id=$1 AND invoice_id=$2 AND status='posted'),0)::text AS waived,COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=$1 AND ca.invoice_id=$2 AND ca.status='posted'),0)::text AS credited`,[auth.schoolId,w.invoice_id]);
