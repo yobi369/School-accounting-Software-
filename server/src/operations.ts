@@ -359,9 +359,19 @@ operationsRouter.get('/fees/receipts',requirePermission('fees.read'),wrap(async(
   res.json({receipts:result.rows});
 }));
 
-const receiptSchema=z.object({
+function isValidIsoCalendarDate(value:string):boolean {
+  const match=/^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if(!match)return false;
+  const year=Number(match[1]),month=Number(match[2]),day=Number(match[3]);
+  if(year<1||month<1||month>12||day<1)return false;
+  const leapYear=year%4===0&&(year%100!==0||year%400===0);
+  const daysInMonth=[31,leapYear?29:28,31,30,31,30,31,31,30,31,30,31];
+  return day<=daysInMonth[month-1];
+}
+
+export const receiptSchema=z.object({
   studentId:z.string().uuid(),receiptNumber:z.string().trim().min(1).max(60).optional(),
-  receivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  receivedOn:z.string().refine(isValidIsoCalendarDate,{message:'Received date must be a real ISO calendar date.'}).optional(),
   amount:z.string().regex(/^\d+(?:\.\d{1,2})?$/),paymentAccountId:z.string().uuid(),paymentMethod:z.enum(['cash','bank','mpesa','cheque','other']),
   externalReference:z.string().trim().max(160).optional(),
   notes:z.string().trim().max(500).optional(),

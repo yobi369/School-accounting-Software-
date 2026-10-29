@@ -9,6 +9,7 @@ on:
       - feature/precious-schoolbooks-fees-receipts-review
       - feature/precious-schoolbooks-fees-receipts-final
       - feature/precious-schoolbooks-fees-receipts-production-ready
+      - fix/fees-receipt-date-validation-tests
 
 permissions:
   contents: read
