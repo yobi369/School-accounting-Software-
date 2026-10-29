@@ -409,7 +409,7 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
              COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
              COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0)::text AS credited
            FROM fee_invoices i WHERE i.school_id=$1 AND i.id=$2 FOR UPDATE`,[auth.schoolId,allocation.invoiceId]);
-        if(!inv.rowCount||inv.rows[0].student_id!==d.studentId||inv.rows[0].status==='void')throw Object.assign(new Error('An allocated invoice is missing, void, or belongs to another student.'),{statusCode:422});
+        if(!inv.rowCount||inv.rows[0].student_id!==d.studentId||['void','reversed'].includes(String(inv.rows[0].status)))throw Object.assign(new Error('An allocated invoice is missing, void, reversed, or belongs to another student.'),{statusCode:422});
         const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(inv.rows[0].allocated))-parseKesToMinorUnits(String(inv.rows[0].waived))-parseKesToMinorUnits(String(inv.rows[0].credited));
         if(allocated>outstanding)throw Object.assign(new Error('Allocation exceeds the invoice outstanding balance.'),{statusCode:422});
         await c.query('INSERT INTO fee_receipt_allocations (school_id,receipt_id,invoice_id,amount) VALUES ($1,$2,$3,$4)',[auth.schoolId,receiptId,allocation.invoiceId,amountString(allocated)]);
