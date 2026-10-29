@@ -341,7 +341,7 @@ const receiptSchema=z.object({
   externalReference:z.string().trim().max(160).optional(),
   notes:z.string().trim().max(500).optional(),
   allocations:z.array(z.object({invoiceId:z.string().uuid(),amount:z.string()})).min(1).max(100),
-});
+}).superRefine((data,ctx)=>{if((data.paymentMethod==='bank'||data.paymentMethod==='mpesa')&&!data.externalReference?.trim())ctx.addIssue({code:'custom',path:['externalReference'],message:'Payment reference is required for Bank and M-Pesa receipts.'});});
 operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap(async(req,res)=>{
   const parsed=receiptSchema.safeParse(req.body);if(!parsed.success){res.status(400).json({error:'Invalid receipt details.',details:parsed.error.flatten()});return;}
   const d=parsed.data;const auth=authContext(req);const receivedOn=d.receivedOn??new Date().toISOString().slice(0,10);
@@ -361,6 +361,7 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
       if(!student.rowCount)throw Object.assign(new Error('Active student not found in this school.'),{statusCode:422});
       const cashAccount=await c.query("SELECT id,account_type,is_active FROM accounts WHERE school_id=$1 AND id=$2",[auth.schoolId,d.paymentAccountId]);
       if(!cashAccount.rowCount||cashAccount.rows[0].account_type!=='asset'||!cashAccount.rows[0].is_active)throw Object.assign(new Error('Select an active cash or bank asset account.'),{statusCode:422});
+      if(d.paymentMethod==='mpesa'&&d.externalReference?.trim()){const duplicate=await c.query("SELECT id FROM fee_receipts WHERE school_id=$1 AND payment_method='mpesa' AND lower(external_reference)=lower($2) AND status='posted' LIMIT 1",[auth.schoolId,d.externalReference.trim()]);if(duplicate.rowCount)throw Object.assign(new Error('This M-Pesa transaction reference has already been recorded.'),{statusCode:409});}
       const receiptId=randomUUID();
       await c.query(
         "INSERT INTO fee_receipts (id,school_id,receipt_number,student_id,received_on,amount,payment_method,external_reference,notes,received_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
