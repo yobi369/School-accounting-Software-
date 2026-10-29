@@ -23,4 +23,4 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shuleledger_app') THEN
     EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON fee_invoice_items TO shuleledger_app';
   END IF;
-END $;
+END $grant$;
