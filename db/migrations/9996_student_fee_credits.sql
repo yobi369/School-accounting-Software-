@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS student_fee_credit_allocations (
   credit_id uuid NOT NULL REFERENCES student_fee_credits(id) ON DELETE RESTRICT,
   invoice_id uuid NOT NULL REFERENCES fee_invoices(id) ON DELETE RESTRICT,
   amount numeric(14,2) NOT NULL CHECK (amount > 0),
+  status text NOT NULL DEFAULT 'posted' CHECK (status IN ('posted','reversed')),
+  reversed_by uuid,
+  reversed_at timestamptz,
+  reversal_reason text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS student_fee_credit_allocations_invoice_idx
