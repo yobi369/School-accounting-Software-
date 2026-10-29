@@ -1108,10 +1108,17 @@ operationsRouter.get('/fees/statements/:studentId',requirePermission('fees.read'
  });
  res.json({statement:result});
 }));
+const schoolClassSchema=z.object({name:z.string().trim().min(1).max(120)});
+operationsRouter.get('/settings/classes',requirePermission('fees.read'),wrap(async(req,res)=>{const auth=authContext(req);const result=await withSchoolTransaction(auth.schoolId,client=>client.query('SELECT id,name,is_active,created_at FROM school_classes WHERE school_id=$1 ORDER BY is_active DESC,name',[auth.schoolId]));res.json({classes:result.rows});}));
+operationsRouter.post('/settings/classes',requirePermission('school.manage'),wrap(async(req,res)=>{const p=schoolClassSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Enter a class or stream name.'});return;}const auth=authContext(req);try{const result=await withSchoolTransaction(auth.schoolId,async client=>{const row=await client.query('INSERT INTO school_classes (id,school_id,name,created_by) VALUES ($1,$2,$3,$4) RETURNING id,name,is_active,created_at',[randomUUID(),auth.schoolId,p.data.name,auth.userId]);await audit(client,auth.schoolId,auth.userId,'school.class.create','school_class',row.rows[0].id,{name:p.data.name});return row.rows[0];});res.status(201).json({class:result});}catch(error){if(!handleError(res,error))throw error;}}));
+const schoolFeeItemSchema=z.object({name:z.string().trim().min(1).max(100),defaultAmount:z.string().regex(/^\\d+(?:\\.\\d{1,2})?$/).optional()});
+operationsRouter.get('/settings/fee-items',requirePermission('fees.read'),wrap(async(req,res)=>{const auth=authContext(req);const result=await withSchoolTransaction(auth.schoolId,client=>client.query('SELECT id,name,default_amount::text,is_active,created_at FROM school_fee_items WHERE school_id=$1 ORDER BY is_active DESC,name',[auth.schoolId]));res.json({feeItems:result.rows});}));
+operationsRouter.post('/settings/fee-items',requirePermission('school.manage'),wrap(async(req,res)=>{const p=schoolFeeItemSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Enter a fee item name and a valid optional default amount.'});return;}const auth=authContext(req);try{const result=await withSchoolTransaction(auth.schoolId,async client=>{const row=await client.query('INSERT INTO school_fee_items (id,school_id,name,default_amount,created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id,name,default_amount::text,is_active,created_at',[randomUUID(),auth.schoolId,p.data.name,p.data.defaultAmount??'0',auth.userId]);await audit(client,auth.schoolId,auth.userId,'school.fee_item.create','school_fee_item',row.rows[0].id,{name:p.data.name,defaultAmount:row.rows[0].default_amount});return row.rows[0];});res.status(201).json({feeItem:result});}catch(error){if(!handleError(res,error))throw error;}}));
+
 const waiverSchema=z.object({invoiceId:z.string().uuid(),waiverNumber:z.string().trim().min(1).max(60),amount:z.string(),reason:z.string().trim().min(3).max(500),waivedOn:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()});
 operationsRouter.get('/fees/waivers',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);const r=await withSchoolTransaction(auth.schoolId,c=>c.query(
-    'SELECT w.id,w.waiver_number,w.invoice_id,i.invoice_number,w.amount::text,w.reason,w.waived_on,w.status,w.journal_entry_id FROM fee_waivers w JOIN fee_invoices i ON i.id=w.invoice_id AND i.school_id=w.school_id WHERE w.school_id=$1 ORDER BY w.created_at DESC LIMIT 500',[auth.schoolId]));
+    'SELECT w.id,w.waiver_number,w.adjustment_type,w.invoice_id,i.invoice_number,w.amount::text,w.reason,w.waived_on,w.status,w.created_by,w.approved_by,w.approved_at,w.rejection_reason,w.rejected_by,w.rejected_at,w.journal_entry_id FROM fee_waivers w JOIN fee_invoices i ON i.id=w.invoice_id AND i.school_id=w.school_id WHERE w.school_id=$1 ORDER BY w.created_at DESC LIMIT 500',[auth.schoolId]));
   res.json({waivers:r.rows});
 }));
 operationsRouter.post('/fees/waivers',requirePermission('fees.manage'),wrap(async(req,res)=>{
@@ -1128,9 +1135,9 @@ operationsRouter.post('/fees/waivers',requirePermission('fees.manage'),wrap(asyn
       const outstanding=parseKesToMinorUnits(String(inv.rows[0].amount))-parseKesToMinorUnits(String(settled.rows[0].allocated))-parseKesToMinorUnits(String(settled.rows[0].waived));
       if(amount>outstanding)throw Object.assign(new Error('Waiver exceeds the invoice outstanding balance.'),{statusCode:422});
       const id=randomUUID();
-      await c.query("INSERT INTO fee_waivers (id,school_id,waiver_number,invoice_id,amount,reason,waived_on,created_by,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'submitted')",[id,auth.schoolId,d.waiverNumber,d.invoiceId,amountString(amount),d.reason,waivedOn,auth.userId]);
-      await audit(c,auth.schoolId,auth.userId,'fee.waiver.submit','fee_waiver',id,{invoiceId:d.invoiceId,amount:amountString(amount),reason:d.reason});
-      return {id,waiverNumber:d.waiverNumber,invoiceId:d.invoiceId,amount:amountString(amount),reason:d.reason,status:'submitted'};
+      await c.query("INSERT INTO fee_waivers (id,school_id,waiver_number,adjustment_type,invoice_id,amount,reason,waived_on,created_by,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'submitted')",[id,auth.schoolId,d.waiverNumber,d.adjustmentType,d.invoiceId,amountString(amount),d.reason,waivedOn,auth.userId]);
+      await audit(c,auth.schoolId,auth.userId,'fee.waiver.submit','fee_waiver',id,{invoiceId:d.invoiceId,adjustmentType:d.adjustmentType,amount:amountString(amount),reason:d.reason});
+      return {id,waiverNumber:d.waiverNumber,adjustmentType:d.adjustmentType,invoiceId:d.invoiceId,amount:amountString(amount),reason:d.reason,status:'submitted'};
     });
     res.status(201).json({waiver,message:'Waiver submitted. A different authorized user must approve it before it affects the ledger.'});
   }catch(error){if(!handleError(res,error))throw error;}
