@@ -40,13 +40,14 @@ describe('fee receipt input validation', () => {
     }
   });
 
-  it('rejects overlong external references and non-positive formatting', () => {
+  it('rejects overlong external references and malformed monetary amounts', () => {
     expect(receiptSchema.safeParse({
       ...validReceipt,
       externalReference: 'x'.repeat(161),
     }).success).toBe(false);
     expect(receiptSchema.safeParse({ ...validReceipt, amount: '-1.00' }).success).toBe(false);
     expect(receiptSchema.safeParse({ ...validReceipt, amount: '1.001' }).success).toBe(false);
+    // Zero is syntactically valid money; the receipt endpoint separately rejects amount <= 0.\n    expect(receiptSchema.safeParse({ ...validReceipt, amount: '0.00' }).success).toBe(true);
   });
 
   it('defaults allocations to an empty list and student credit to false', () => {
