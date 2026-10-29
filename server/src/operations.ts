@@ -182,7 +182,7 @@ const feeStructureSchema=z.object({
 operationsRouter.get('/fees/structures',requirePermission('fees.read'),wrap(async(req,res)=>{
   const auth=authContext(req);
   const result=await withSchoolTransaction(auth.schoolId,c=>c.query(
-    "SELECT f.id,f.class_name,f.academic_year,f.term_name,f.academic_term_id,f.due_on,f.status,f.created_at,COALESCE(json_agg(json_build_object('id',i.id,'itemName',i.item_name,'amount',i.amount::text)) FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS items,COALESCE((SELECT count(*)::int FROM fee_invoices inv WHERE inv.school_id=f.school_id AND inv.fee_structure_id=f.id),0) AS invoices_created FROM fee_structures f LEFT JOIN fee_structure_items i ON i.school_id=f.school_id AND i.structure_id=f.id WHERE f.school_id=$1 GROUP BY f.id ORDER BY f.academic_year DESC,f.term_name,f.class_name",
+    "SELECT f.id,f.class_name,f.academic_year,f.term_name,f.academic_term_id,f.due_on,f.status,f.created_at,COALESCE(json_agg(json_build_object('id',i.id,'itemName',i.item_name,'amount',i.amount::text)) FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS items,COALESCE((SELECT count(*)::int FROM fee_invoices inv WHERE inv.school_id=f.school_id AND inv.fee_structure_id=f.id),0) AS invoices_created,COALESCE((SELECT sum(fi.amount) FROM fee_structure_items fi WHERE fi.school_id=f.school_id AND fi.structure_id=f.id),0)::numeric(14,2)::text AS total_fees,(SELECT count(*)::int FROM students st WHERE st.school_id=f.school_id AND st.class_name=f.class_name AND st.status='active') AS eligible_students FROM fee_structures f LEFT JOIN fee_structure_items i ON i.school_id=f.school_id AND i.structure_id=f.id WHERE f.school_id=$1 GROUP BY f.id ORDER BY f.academic_year DESC,f.term_name,f.class_name",
     [auth.schoolId]));
   res.json({structures:result.rows});
 }));
@@ -258,7 +258,7 @@ operationsRouter.post('/fees/structures/:id/invoice-class',requirePermission('fe
         const existing=await c.query("SELECT id,invoice_number FROM fee_invoices WHERE school_id=$1 AND student_id=$2 AND fee_structure_id=$3",[auth.schoolId,student.id,id.data]);
         if(existing.rowCount){skipped.push({studentId:student.id,invoiceNumber:existing.rows[0].invoice_number});continue;}
         const invoiceId=randomUUID();
-        const invoiceNumber='FS-'+id.data.replace(/-/g,'').slice(0,10).toUpperCase()+'-'+String(student.id).replace(/-/g,'').slice(0,10).toUpperCase();
+        const invoiceNumber=await nextFeeDocumentNumber(c,auth.schoolId,'INV',issuedOn);
         const description=items.rows.map(item=>String(item.item_name)).join(', ');
         await c.query("INSERT INTO fee_invoices (id,school_id,student_id,invoice_number,academic_year,description,issued_on,due_on,amount,status,created_by,fee_structure_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'issued',$10,$11)",[invoiceId,auth.schoolId,student.id,invoiceNumber,f.academic_year,description,issuedOn,f.due_on,amountString(total),auth.userId,id.data]);
         const journal=await postJournal(c,auth.schoolId,auth.userId,issuedOn,'Bulk fee invoice '+invoiceNumber+': '+description,'fee_invoice',invoiceId,[
@@ -269,7 +269,7 @@ operationsRouter.post('/fees/structures/:id/invoice-class',requirePermission('fe
         created.push({studentId:student.id,invoiceNumber,amount:amountString(total),journalEntryId:journal.id});
       }
       await audit(c,auth.schoolId,auth.userId,'fee.structure.bulk_invoice','fee_structure',id.data,{createdCount:created.length,skippedCount:skipped.length,academicYear:f.academic_year,termName:f.term_name});
-      return {structureId:id.data,created,skipped,createdCount:created.length,skippedCount:skipped.length,totalPerInvoice:amountString(total)};
+      return {structureId:id.data,created,skipped,createdCount:created.length,skippedCount:skipped.length,eligibleStudentCount:students.rowCount,totalPerInvoice:amountString(total),expectedTotal:amountString(total*BigInt(students.rowCount))};
     });
     res.status(200).json(outcome);
   }catch(error){if(!handleError(res,error))throw error;}
@@ -364,8 +364,12 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
       }
       const student=await c.query("SELECT id FROM students WHERE school_id=$1 AND id=$2 AND status='active'",[auth.schoolId,d.studentId]);
       if(!student.rowCount)throw Object.assign(new Error('Active student not found in this school.'),{statusCode:422});
-      const cashAccount=await c.query("SELECT id,account_type,is_active FROM accounts WHERE school_id=$1 AND id=$2",[auth.schoolId,d.paymentAccountId]);
-      if(!cashAccount.rowCount||cashAccount.rows[0].account_type!=='asset'||!cashAccount.rows[0].is_active)throw Object.assign(new Error('Select an active cash or bank asset account.'),{statusCode:422});
+      const cashAccount=await c.query("SELECT id,code,name,account_type,is_active FROM accounts WHERE school_id=$1 AND id=$2",[auth.schoolId,d.paymentAccountId]);
+      if(!cashAccount.rowCount||cashAccount.rows[0].account_type!=='asset'||!cashAccount.rows[0].is_active)throw Object.assign(new Error('Select an active cash, bank, or M-Pesa asset account.'),{statusCode:422});
+      const accountName=String(cashAccount.rows[0].name).toLowerCase();const accountCode=String(cashAccount.rows[0].code).toLowerCase();
+      if(d.paymentMethod==='cash'&&!(accountCode==='1000'||accountName.includes('cash')))throw Object.assign(new Error('Cash payments must be posted to a Cash ledger account.'),{statusCode:422});
+      if(d.paymentMethod==='mpesa'&&!(accountName.includes('mpesa')||accountName.includes('m-pesa')||accountName.includes('mobile money')||accountCode.includes('mpesa')))throw Object.assign(new Error('M-Pesa payments must be posted to an M-Pesa / mobile-money ledger account.'),{statusCode:422});
+      if(d.paymentMethod==='bank'){const mapped=await c.query('SELECT id FROM bank_accounts WHERE school_id=$1 AND ledger_account_id=$2 AND is_active=true LIMIT 1',[auth.schoolId,d.paymentAccountId]);if(!mapped.rowCount)throw Object.assign(new Error('Bank payments must use a ledger account mapped to an active Bank Account under Cash & Bank settings.'),{statusCode:422});}
       if(d.paymentMethod==='mpesa'&&d.externalReference?.trim()){const duplicate=await c.query("SELECT id FROM fee_receipts WHERE school_id=$1 AND payment_method='mpesa' AND lower(external_reference)=lower($2) AND status='posted' LIMIT 1",[auth.schoolId,d.externalReference.trim()]);if(duplicate.rowCount)throw Object.assign(new Error('This M-Pesa transaction reference has already been recorded.'),{statusCode:409});}
       const receiptId=randomUUID();const receiptNumber=d.receiptNumber??await nextFeeDocumentNumber(c,auth.schoolId,'RCT',receivedOn);
       await c.query(
