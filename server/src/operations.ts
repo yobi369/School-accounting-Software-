@@ -349,7 +349,8 @@ const receiptSchema=z.object({
   amount:z.string(),paymentAccountId:z.string().uuid(),paymentMethod:z.enum(['cash','bank','mpesa','cheque','other']),
   externalReference:z.string().trim().max(160).optional(),
   notes:z.string().trim().max(500).optional(),
-  allocations:z.array(z.object({invoiceId:z.string().uuid(),amount:z.string()})).min(1).max(100),
+  allocations:z.array(z.object({invoiceId:z.string().uuid(),amount:z.string()})).max(100).default([]),
+  allowStudentCredit:z.boolean().optional().default(false),
 }).superRefine((data,ctx)=>{if((data.paymentMethod==='bank'||data.paymentMethod==='mpesa')&&!data.externalReference?.trim())ctx.addIssue({code:'custom',path:['externalReference'],message:'Payment reference is required for Bank and M-Pesa receipts.'});});
 operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap(async(req,res)=>{
   const parsed=receiptSchema.safeParse(req.body);if(!parsed.success){res.status(400).json({error:'Invalid receipt details.',details:parsed.error.flatten()});return;}
@@ -357,7 +358,8 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
   const idempotencyKey=req.header('Idempotency-Key');if(!idempotencyKey||idempotencyKey.length<8||idempotencyKey.length>200){res.status(400).json({error:'An Idempotency-Key header between 8 and 200 characters is required.'});return;}
   const requestHash=createHash('sha256').update(JSON.stringify(d)).digest('hex');
   const amount=parseKesToMinorUnits(d.amount);const allocationTotal=d.allocations.reduce((sum,a)=>sum+parseKesToMinorUnits(a.amount),0n);
-  if(amount<=0n||allocationTotal!==amount){res.status(422).json({error:'Receipt amount must be positive and fully allocated to invoices.'});return;}
+  if(amount<=0n||allocationTotal>amount){res.status(422).json({error:'Receipt amount must be positive and invoice allocations cannot exceed the receipt amount.'});return;}
+  if(amount>allocationTotal&&!d.allowStudentCredit){res.status(422).json({error:'The unallocated amount must be explicitly recorded as a Student Credit Balance.'});return;}
   try{
     const outcome=await withSchoolTransaction(auth.schoolId,async c=>{
       const existing=await c.query('SELECT request_hash,response_body FROM idempotency_records WHERE school_id=$1 AND idempotency_key=$2 FOR UPDATE',[auth.schoolId,idempotencyKey]);
@@ -377,7 +379,7 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
       if(d.paymentMethod==='mpesa'&&d.externalReference?.trim()){await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`mpesa-reference:${auth.schoolId}:${d.externalReference.trim().toLowerCase()}`]);const duplicate=await c.query("SELECT id FROM fee_receipts WHERE school_id=$1 AND payment_method='mpesa' AND lower(external_reference)=lower($2) AND status='posted' LIMIT 1",[auth.schoolId,d.externalReference.trim()]);if(duplicate.rowCount)throw Object.assign(new Error('This M-Pesa transaction reference has already been recorded.'),{statusCode:409});}
       await c.query("SELECT id FROM fee_invoices WHERE school_id=$1 AND student_id=$2 AND status NOT IN ('void','reversed') ORDER BY id FOR UPDATE",[auth.schoolId,d.studentId]);
       const previous=await c.query(`SELECT COALESCE(sum(i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)),0)::numeric(14,2)::text AS balance FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status NOT IN ('void','reversed')`,[auth.schoolId,d.studentId]);const previousBalance=String(previous.rows[0].balance??'0.00');
-      const receiptId=randomUUID();const receiptNumber=d.receiptNumber??await nextFeeDocumentNumber(c,auth.schoolId,'RCT',receivedOn);
+      const receiptId=randomUUID();const receiptNumber=d.receiptNumber??await nextFeeDocumentNumber(c,auth.schoolId,'RCT',receivedOn);const studentCredit=amount-allocationTotal;
       await c.query(
         "INSERT INTO fee_receipts (id,school_id,receipt_number,student_id,received_on,amount,payment_method,external_reference,notes,received_by,previous_balance,new_balance) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULL)",
         [receiptId,auth.schoolId,receiptNumber,d.studentId,receivedOn,amountString(amount),d.paymentMethod,d.externalReference??null,d.notes??null,auth.userId,previousBalance]);
@@ -394,6 +396,7 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
         if(allocated>outstanding)throw Object.assign(new Error('Allocation exceeds the invoice outstanding balance.'),{statusCode:422});
         await c.query('INSERT INTO fee_receipt_allocations (school_id,receipt_id,invoice_id,amount) VALUES ($1,$2,$3,$4)',[auth.schoolId,receiptId,allocation.invoiceId,amountString(allocated)]);
       }
+      let studentCreditId:string|null=null;if(studentCredit>0n){studentCreditId=randomUUID();await c.query("INSERT INTO student_fee_credits (id,school_id,student_id,receipt_id,amount,remaining_amount,status) VALUES ($1,$2,$3,$4,$5,$5,'posted')",[studentCreditId,auth.schoolId,d.studentId,receiptId,amountString(studentCredit)]);await audit(c,auth.schoolId,auth.userId,'student.fee_credit.create','student_fee_credit',studentCreditId,{receiptId,receiptNumber,amount:amountString(studentCredit)});}
       const journal=await postJournal(c,auth.schoolId,auth.userId,receivedOn,`Fee receipt ${receiptNumber}`,'fee_receipt',receiptId,[
         {accountId:d.paymentAccountId,debit:amountString(amount),credit:'0.00'},
         {accountCode:'1200',debit:'0.00',credit:amountString(amount)},
@@ -408,7 +411,7 @@ operationsRouter.post('/fees/receipts',requirePermission('receipts.create'),wrap
         [auth.schoolId,d.allocations.map(a=>a.invoiceId)]);
       const newBalanceResult=await c.query(`SELECT COALESCE(sum(i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.school_id=a.school_id AND r.id=a.receipt_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)),0)::numeric(14,2)::text AS balance FROM fee_invoices i WHERE i.school_id=$1 AND i.student_id=$2 AND i.status NOT IN ('void','reversed')`,[auth.schoolId,d.studentId]);const newBalance=String(newBalanceResult.rows[0].balance??'0.00');await c.query('UPDATE fee_receipts SET new_balance=$3 WHERE school_id=$1 AND id=$2',[auth.schoolId,receiptId,newBalance]);
       await audit(c,auth.schoolId,auth.userId,'fee.receipt.post','fee_receipt',receiptId,{receiptNumber,journalEntryId:journal.id,amount:amountString(amount),previousBalance,newBalance});
-      const receipt={id:receiptId,receiptNumber,studentId:d.studentId,studentName:student.rows[0].full_name,admissionNumber:student.rows[0].admission_number,className:student.rows[0].class_name,schoolName:auth.schoolName,receivedOn,amount:amountString(amount),previousBalance,newBalance,paymentMethod:d.paymentMethod,externalReference:d.externalReference??null,status:'posted',journalEntryId:journal.id};
+      const receipt={id:receiptId,receiptNumber,studentId:d.studentId,studentName:student.rows[0].full_name,admissionNumber:student.rows[0].admission_number,className:student.rows[0].class_name,schoolName:auth.schoolName,receivedOn,amount:amountString(amount),previousBalance,newBalance,studentCreditAmount:amountString(studentCredit),studentCreditId,paymentMethod:d.paymentMethod,externalReference:d.externalReference??null,status:'posted',journalEntryId:journal.id};
       await c.query('INSERT INTO idempotency_records (school_id,idempotency_key,request_hash,response_status,response_body,resource_type,resource_id) VALUES ($1,$2,$3,201,$4::jsonb,\'fee_receipt\',$5)',[auth.schoolId,idempotencyKey,requestHash,JSON.stringify({receipt}),receiptId]);
       return {receipt,duplicate:false};
     });
@@ -1210,7 +1213,9 @@ operationsRouter.post('/ledger/journals/:id/reverse',requirePermission('ledger.p
       const journal=await postJournal(c,auth.schoolId,auth.userId,reversalDate,`Reversal of ${original.rows[0].entry_number}: ${p.data.reason}`,'reversal',id.data,lines,id.data);
       if(source==='fee_invoice'&&sourceId)await c.query("UPDATE fee_invoices SET status='void' WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
       if(source==='fee_receipt'&&sourceId){
+        const usedCredit=await c.query('SELECT COALESCE(sum(a.amount),0)::text AS used FROM student_fee_credit_allocations a JOIN student_fee_credits cr ON cr.id=a.credit_id AND cr.school_id=a.school_id WHERE a.school_id=$1 AND cr.receipt_id=$2',[auth.schoolId,sourceId]);if(parseKesToMinorUnits(String(usedCredit.rows[0].used))>0n)throw Object.assign(new Error('This receipt has student credit that has already been allocated. Reverse those credit allocations before reversing the receipt.'),{statusCode:409});
         await c.query("UPDATE fee_receipts SET status='reversed' WHERE school_id=$1 AND id=$2",[auth.schoolId,sourceId]);
+        await c.query("UPDATE student_fee_credits SET status='reversed',remaining_amount=0 WHERE school_id=$1 AND receipt_id=$2",[auth.schoolId,sourceId]);
         const invoices=await c.query('SELECT DISTINCT invoice_id FROM fee_receipt_allocations WHERE school_id=$1 AND receipt_id=$2',[auth.schoolId,sourceId]);
         for(const row of invoices.rows){
           const settlement=await c.query(
