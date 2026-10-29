@@ -304,6 +304,7 @@ operationsRouter.get('/fees/invoices',requirePermission('fees.read'),wrap(async(
       COALESCE((SELECT json_agg(json_build_object('itemName',ii.item_name,'description',ii.description,'amount',ii.amount::text) ORDER BY ii.line_number) FROM fee_invoice_items ii WHERE ii.school_id=i.school_id AND ii.invoice_id=i.id),'[]'::json) AS items,
       COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)::text AS allocated,
       COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)::text AS waived,
+      COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0)::text AS credited,
       (i.amount-COALESCE((SELECT sum(a.amount) FROM fee_receipt_allocations a JOIN fee_receipts r ON r.id=a.receipt_id AND r.school_id=a.school_id WHERE a.school_id=i.school_id AND a.invoice_id=i.id AND r.status='posted'),0)-COALESCE((SELECT sum(w.amount) FROM fee_waivers w WHERE w.school_id=i.school_id AND w.invoice_id=i.id AND w.status='posted'),0)-COALESCE((SELECT sum(ca.amount) FROM student_fee_credit_allocations ca WHERE ca.school_id=i.school_id AND ca.invoice_id=i.id AND ca.status='posted'),0))::numeric(14,2)::text AS outstanding
      FROM fee_invoices i JOIN students s ON s.id=i.student_id AND s.school_id=i.school_id LEFT JOIN fee_structures fs ON fs.school_id=i.school_id AND fs.id=i.fee_structure_id
      WHERE i.school_id=$1 AND ($2::uuid IS NULL OR fs.academic_term_id=$2::uuid) ORDER BY i.issued_on DESC,i.invoice_number DESC LIMIT 500`,[auth.schoolId,academicTermId]));
@@ -1095,6 +1096,13 @@ operationsRouter.get('/fees/statements/:studentId',requirePermission('fees.read'
      FROM student_fee_credits cr JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id
      WHERE cr.school_id=$1 AND cr.student_id=$2
      UNION ALL
+     SELECT ca.created_at::date,'Credit allocation',r.receipt_number,'Student credit applied to invoice '||i.invoice_number,ca.amount::numeric(14,2),ca.amount::numeric(14,2),3
+     FROM student_fee_credit_allocations ca JOIN student_fee_credits cr ON cr.school_id=ca.school_id AND cr.id=ca.credit_id JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id JOIN fee_invoices i ON i.school_id=ca.school_id AND i.id=ca.invoice_id
+     WHERE ca.school_id=$1 AND cr.student_id=$2
+     UNION ALL
+     SELECT ca.reversed_at::date,'Credit allocation reversal',r.receipt_number,'Reversal of student credit allocation to invoice '||i.invoice_number,ca.amount::numeric(14,2),ca.amount::numeric(14,2),4
+     FROM student_fee_credit_allocations ca JOIN student_fee_credits cr ON cr.school_id=ca.school_id AND cr.id=ca.credit_id JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id JOIN fee_invoices i ON i.school_id=ca.school_id AND i.id=ca.invoice_id
+     WHERE ca.school_id=$1 AND cr.student_id=$2 AND ca.status='reversed'
      SELECT rev.posting_date,'Reversal',r.receipt_number,'Reversal of student credit balance',cr.amount::numeric(14,2),0::numeric(14,2),4
      FROM student_fee_credits cr JOIN fee_receipts r ON r.school_id=cr.school_id AND r.id=cr.receipt_id
      JOIN journal_entries rev ON rev.school_id=r.school_id AND rev.reversal_of_id=r.journal_entry_id AND rev.status='posted'
