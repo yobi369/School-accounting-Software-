@@ -7,6 +7,26 @@ if (!migrationUrl || !runtimePassword || runtimePassword.length < 24) {
   throw new Error('Render startup requires MIGRATIONS_DATABASE_URL and a generated RUNTIME_DATABASE_PASSWORD of at least 24 characters.');
 }
 
+// Ensure the runtime role exists before migrations that grant it table privileges.
+// This preserves immutable migration checksums and supports first-time deployments.
+const bootstrapAdmin = new pg.Pool({
+  connectionString: migrationUrl,
+  max: 1,
+  ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: true } : undefined,
+});
+try {
+  const existingRole = await bootstrapAdmin.query("SELECT 1 FROM pg_roles WHERE rolname = 'shuleledger_app'");
+  if (!existingRole.rowCount) {
+    const passwordSql = await bootstrapAdmin.query(
+      "SELECT format('CREATE ROLE shuleledger_app LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', $1::text) AS sql",
+      [runtimePassword],
+    );
+    await bootstrapAdmin.query(passwordSql.rows[0].sql);
+  }
+} finally {
+  await bootstrapAdmin.end();
+}
+
 const migration = spawnSync(process.execPath, ['scripts/migrate.mjs'], {
   stdio: 'inherit',
   env: process.env,
