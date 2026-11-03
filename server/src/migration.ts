@@ -20,6 +20,7 @@ const dateOnly=z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value=>{
   return !Number.isNaN(date.getTime())&&date.toISOString().slice(0,10)===value;
 },'Enter a valid calendar date.');
 const createBatchSchema=z.object({
+  batchType:z.enum(['opening_balances','historical_transactions']).default('opening_balances'),
   effectiveDate:dateOnly,
   description:z.string().trim().min(3).max(500),
   sourceLabel:z.string().trim().min(1).max(160),
@@ -29,6 +30,8 @@ const rowSchema=z.object({
   debit:z.string().default('0.00'),
   credit:z.string().default('0.00'),
   memo:z.string().trim().max(500).optional(),
+  transactionDate:dateOnly.optional(),
+  externalReference:z.string().trim().max(160).optional(),
 });
 const addRowsSchema=z.object({rows:z.array(rowSchema).min(1).max(500)});
 const reviewSchema=z.object({decision:z.enum(['approved','rejected']),note:z.string().trim().max(1000).optional()});
@@ -42,6 +45,8 @@ function rowFingerprint(row:z.infer<typeof rowSchema>):string {
     debit:row.debit,
     credit:row.credit,
     memo:row.memo??'',
+    transactionDate:row.transactionDate??'',
+    externalReference:(row.externalReference??'').trim().toUpperCase(),
   })).digest('hex');
 }
 function money(value:string):bigint {
@@ -56,10 +61,10 @@ migrationRouter.post('/migration/batches',requirePermission('migration.manage'),
   const batchId=randomUUID();
   const batch=await withSchoolTransaction(auth.schoolId,async client=>{
     const result=await client.query(
-      "INSERT INTO migration_batches (id,school_id,batch_type,status,effective_date,description,source_label,created_by) VALUES ($1,$2,'opening_balances','draft',$3,$4,$5,$6) RETURNING id,batch_type,status,effective_date::text,description,source_label,row_count,created_at",
-      [batchId,auth.schoolId,parsed.data.effectiveDate,parsed.data.description,parsed.data.sourceLabel,auth.userId],
+      "INSERT INTO migration_batches (id,school_id,batch_type,status,effective_date,description,source_label,created_by) VALUES ($1,$2,$7,'draft',$3,$4,$5,$6) RETURNING id,batch_type,status,effective_date::text,description,source_label,row_count,created_at",
+      [batchId,auth.schoolId,parsed.data.effectiveDate,parsed.data.description,parsed.data.sourceLabel,auth.userId,parsed.data.batchType],
     );
-    await audit(client,auth.schoolId,auth.userId,'migration.batch.create','migration_batch',batchId,{batchType:'opening_balances',effectiveDate:parsed.data.effectiveDate});
+    await audit(client,auth.schoolId,auth.userId,'migration.batch.create','migration_batch',batchId,{batchType:parsed.data.batchType,effectiveDate:parsed.data.effectiveDate});
     return result.rows[0];
   });
   res.status(201).json({batch});
@@ -67,12 +72,12 @@ migrationRouter.post('/migration/batches',requirePermission('migration.manage'),
 
 migrationRouter.post('/migration/batches/:batchId/rows',requirePermission('migration.manage'),wrap(async(req,res)=>{
   const parsed=addRowsSchema.safeParse(req.body);
-  if(!parsed.success)fail('Provide between 1 and 500 valid opening-balance rows.',400);
+  if(!parsed.success)fail('Provide between 1 and 500 valid migration rows.',400);
   const auth=authContext(req);
   const batchId=z.string().uuid().safeParse(req.params.batchId);
   if(!batchId.success)fail('Invalid migration batch ID.',400);
   const result=await withSchoolTransaction(auth.schoolId,async client=>{
-    const batch=await client.query('SELECT status FROM migration_batches WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,batchId.data]);
+    const batch=await client.query('SELECT status,batch_type FROM migration_batches WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,batchId.data]);
     if(!batch.rowCount)fail('Migration batch not found.',404);
     if(batch.rows[0].status!=='draft')fail('Rows can only be added while a migration batch is in draft.',409);
     const existingRows=await client.query('SELECT COALESCE(MAX(row_number),0)::int AS max_row FROM migration_batch_rows WHERE school_id=$1 AND batch_id=$2',[auth.schoolId,batchId.data]);
@@ -80,11 +85,13 @@ migrationRouter.post('/migration/batches/:batchId/rows',requirePermission('migra
     const inserted=[];
     for(const [index,row] of parsed.data.rows.entries()){
       const debit=money(row.debit),credit=money(row.credit);
-      if(debit<0n||credit<0n)fail('Opening-balance debit and credit amounts cannot be negative.',422);
+      if(debit<0n||credit<0n)fail('Migration debit and credit amounts cannot be negative.',422);
+      if(batch.rows[0].batch_type==='historical_transactions'&&!row.transactionDate)fail('Historical transaction rows require their original transaction date.',422);
+      if(batch.rows[0].batch_type==='opening_balances'&&(row.transactionDate||row.externalReference))fail('Opening-balance rows cannot include historical transaction metadata.',422);
       if((debit>0n)===(credit>0n))fail('Each row must contain either a positive debit or a positive credit, not both.',422);
       const account=await client.query('SELECT id,code FROM accounts WHERE school_id=$1 AND upper(code)=upper($2) AND is_active=true',[auth.schoolId,row.accountCode]);
       if(!account.rowCount)fail('An account code is missing, inactive, or does not belong to this school: '+row.accountCode,422);
-      const normalized={accountCode:String(account.rows[0].code),debit:formatMoney(debit),credit:formatMoney(credit),memo:row.memo??''};
+      const normalized={accountCode:String(account.rows[0].code),debit:formatMoney(debit),credit:formatMoney(credit),memo:row.memo??'',transactionDate:row.transactionDate??null,externalReference:row.externalReference??null};
       const payload=normalized;
       const fingerprint=rowFingerprint(normalized);
       const saved=await client.query(
@@ -128,13 +135,21 @@ migrationRouter.post('/migration/batches/:batchId/submit',requirePermission('mig
     if(!batch.rowCount)fail('Migration batch not found.',404);
     if(batch.rows[0].status!=='draft')fail('Only draft migration batches can be submitted.',409);
     const rows=await client.query('SELECT payload FROM migration_batch_rows WHERE school_id=$1 AND batch_id=$2 ORDER BY row_number',[auth.schoolId,parsed.data]);
-    if(rows.rows.length<2)fail('An opening-balance journal requires at least two account rows.',422);
+    if(rows.rows.length<2)fail('A migration batch requires at least two account rows.',422);
     let debits=0n,credits=0n;
+    const historicalTotals=new Map<string,{debit:bigint;credit:bigint}>();
     for(const item of rows.rows){
-      const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string};
-      debits+=money(payload.debit);credits+=money(payload.credit);
+      const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string;transactionDate?:string|null};
+      const debit=money(payload.debit),credit=money(payload.credit);
+      debits+=debit;credits+=credit;
+      if(batch.rows[0].batch_type==='historical_transactions'){
+        if(!payload.transactionDate)fail('Historical transaction row is missing its original date.',422);
+        const total=historicalTotals.get(payload.transactionDate)??{debit:0n,credit:0n};
+        total.debit+=debit;total.credit+=credit;historicalTotals.set(payload.transactionDate,total);
+      }
     }
-    if(debits<=0n||debits!==credits)fail('Opening balances must have equal, positive total debits and credits.',422);
+    if(debits<=0n||debits!==credits)fail('Migration batch must have equal, positive total debits and credits.',422);
+    for(const [date,total] of historicalTotals){if(total.debit<=0n||total.debit!==total.credit)fail('Historical entries must balance separately for each transaction date: '+date,422);}
     const period=await client.query(
       "SELECT p.id FROM financial_years y JOIN accounting_periods p ON p.school_id=y.school_id AND p.financial_year_id=y.id WHERE y.school_id=$1 AND y.status='open' AND p.status='open' AND y.starts_on<=$2::date AND y.ends_on>=$2::date AND p.starts_on<=$2::date AND p.ends_on>=$2::date",
       [auth.schoolId,batch.rows[0].effective_date],
