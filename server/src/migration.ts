@@ -106,7 +106,7 @@ migrationRouter.post('/migration/batches/:batchId/rows',requirePermission('migra
     await audit(client,auth.schoolId,auth.userId,'migration.batch.rows.add','migration_batch',batchId.data,{added:inserted.length,total:count.rows[0].n});
     return {inserted:inserted.length,rowCount:count.rows[0].n};
   });
-  res.status(result.alreadyPosted?200:201).json(result);
+  res.status(201).json(result);
 }));
 
 migrationRouter.get('/migration/batches/:batchId',wrap(async(req,res)=>{
@@ -254,5 +254,5 @@ migrationRouter.post('/migration/batches/:batchId/post',requirePermission('migra
       {batchType,journals:journalResults});
     return {status:'posted',batchType,alreadyPosted:false,journals:journalResults};
   });
-  res.status(201).json(result);
+  res.status(result.alreadyPosted?200:201).json(result);
 }));
