@@ -83,6 +83,31 @@ CREATE POLICY migration_approvals_tenant_isolation ON migration_batch_approvals
   USING (school_id = shuleledger_current_school_id())
   WITH CHECK (school_id = shuleledger_current_school_id());
 
+CREATE OR REPLACE FUNCTION enforce_migration_approval_separation()
+RETURNS trigger LANGUAGE plpgsql AS $
+DECLARE
+  v_creator uuid;
+  v_status text;
+BEGIN
+  SELECT created_by,status INTO v_creator,v_status
+    FROM migration_batches
+    WHERE school_id=NEW.school_id AND id=NEW.batch_id
+    FOR UPDATE;
+  IF NOT FOUND OR v_status <> 'pending_review' THEN
+    RAISE EXCEPTION 'Only a submitted migration batch can receive a review decision'
+      USING ERRCODE = '23514';
+  END IF;
+  IF v_creator = NEW.reviewer_user_id THEN
+    RAISE EXCEPTION 'The migration preparer cannot approve their own batch'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$;
+CREATE TRIGGER migration_approval_separation
+BEFORE INSERT ON migration_batch_approvals
+FOR EACH ROW EXECUTE FUNCTION enforce_migration_approval_separation();
+
 CREATE OR REPLACE FUNCTION protect_migration_approvals()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
