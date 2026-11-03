@@ -72,6 +72,8 @@ migrationRouter.post('/migration/batches/:batchId/rows',requirePermission('migra
     const batch=await client.query('SELECT status FROM migration_batches WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,batchId.data]);
     if(!batch.rowCount)fail('Migration batch not found.',404);
     if(batch.rows[0].status!=='draft')fail('Rows can only be added while a migration batch is in draft.',409);
+    const existingRows=await client.query('SELECT COALESCE(MAX(row_number),0)::int AS max_row FROM migration_batch_rows WHERE school_id=$1 AND batch_id=$2',[auth.schoolId,batchId.data]);
+    const firstRowNumber=Number(existingRows.rows[0].max_row)+1;
     const inserted=[];
     for(const [index,row] of parsed.data.rows.entries()){
       const debit=money(row.debit),credit=money(row.credit);
@@ -82,7 +84,7 @@ migrationRouter.post('/migration/batches/:batchId/rows',requirePermission('migra
       const fingerprint=rowFingerprint({...row,accountCode:String(account.rows[0].code)});
       const saved=await client.query(
         'INSERT INTO migration_batch_rows (school_id,batch_id,row_number,fingerprint,payload) VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (school_id,batch_id,fingerprint) DO NOTHING RETURNING id,row_number',
-        [auth.schoolId,batchId.data,index+1,fingerprint,JSON.stringify(payload)],
+        [auth.schoolId,batchId.data,firstRowNumber+index,fingerprint,JSON.stringify(payload)],
       );
       if(!saved.rowCount)fail('A duplicate opening-balance row was detected in this batch.',409);
       inserted.push(saved.rows[0]);
@@ -95,8 +97,9 @@ migrationRouter.post('/migration/batches/:batchId/rows',requirePermission('migra
   res.status(201).json(result);
 }));
 
-migrationRouter.get('/migration/batches/:batchId',requirePermission('migration.manage'),wrap(async(req,res)=>{
+migrationRouter.get('/migration/batches/:batchId',wrap(async(req,res)=>{
   const auth=authContext(req);
+  if(!auth.permissions.includes('migration.manage')&&!auth.permissions.includes('migration.approve'))fail('Insufficient permission.',403);
   const parsed=z.string().uuid().safeParse(req.params.batchId);
   if(!parsed.success)fail('Invalid migration batch ID.',400);
   const result=await withSchoolTransaction(auth.schoolId,async client=>{
