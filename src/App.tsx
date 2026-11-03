@@ -40,7 +40,7 @@ const human=(value:unknown):string=>{
   if(typeof value==='object')return JSON.stringify(value);
   return String(value);
 };
-const formatDateLabel=(value:unknown):string=>{const raw=String(value??'');if(!/^\d{4}-\d{2}-\d{2}$/.test(raw))return raw||'—';const date=new Date(raw+'T00:00:00Z');return Number.isNaN(date.getTime())?raw:new Intl.DateTimeFormat('en-KE',{day:'2-digit',month:'short',year:'numeric',timeZone:'UTC'}).format(date);};
+const formatDateLabel=(value:unknown):string=>{const raw=String(value??'').trim();const datePart=raw.match(/^(\d{4}-\d{2}-\d{2})/)?.[1];if(!datePart)return raw||'—';const date=new Date(datePart+'T00:00:00Z');return Number.isNaN(date.getTime())?raw:new Intl.DateTimeFormat('en-KE',{day:'2-digit',month:'short',year:'numeric',timeZone:'UTC'}).format(date);};
 const formatDateRange=(start:unknown,end:unknown):string=>formatDateLabel(start)+' – '+formatDateLabel(end);
 const today=()=>new Date().toISOString().slice(0,10);
 async function stableIdempotencyKey(prefix:string,payload:unknown):Promise<string>{const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(payload)));return prefix+':'+Array.from(new Uint8Array(digest)).map(b=>b.toString(16).padStart(2,'0')).join('');}
