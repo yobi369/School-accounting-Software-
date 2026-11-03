@@ -68,12 +68,12 @@ ALTER TABLE migration_batch_postings FORCE ROW LEVEL SECURITY;
 CREATE POLICY migration_batch_postings_tenant_isolation ON migration_batch_postings
   USING (school_id = shuleledger_current_school_id())
   WITH CHECK (school_id = shuleledger_current_school_id());
-DO $
+DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='shuleledger_app') THEN
     GRANT SELECT,INSERT ON migration_batch_postings TO shuleledger_app;
   END IF;
-END $;
+END $$;
 
 CREATE INDEX migration_batch_rows_reference_idx ON migration_batch_rows(school_id,external_reference)
   WHERE external_reference IS NOT NULL;
