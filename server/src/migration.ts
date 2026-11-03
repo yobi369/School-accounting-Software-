@@ -127,7 +127,7 @@ migrationRouter.post('/migration/batches/:batchId/submit',requirePermission('mig
     if(!batch.rowCount)fail('Migration batch not found.',404);
     if(batch.rows[0].status!=='draft')fail('Only draft migration batches can be submitted.',409);
     const rows=await client.query('SELECT payload FROM migration_batch_rows WHERE school_id=$1 AND batch_id=$2 ORDER BY row_number',[auth.schoolId,parsed.data]);
-    if(rows.rowCount<2)fail('An opening-balance journal requires at least two account rows.',422);
+    if(rows.rows.length<2)fail('An opening-balance journal requires at least two account rows.',422);
     let debits=0n,credits=0n;
     for(const item of rows.rows){
       const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string};
@@ -140,7 +140,7 @@ migrationRouter.post('/migration/batches/:batchId/submit',requirePermission('mig
     );
     if(!period.rowCount)fail('The opening-balance date must fall within an open financial year and accounting period.',422);
     await client.query("UPDATE migration_batches SET status='pending_review',submitted_at=now(),updated_at=now() WHERE school_id=$1 AND id=$2",[auth.schoolId,parsed.data]);
-    await audit(client,auth.schoolId,auth.userId,'migration.batch.submit','migration_batch',parsed.data,{rowCount:rows.rowCount,totalDebitMinor:debits.toString(),totalCreditMinor:credits.toString()});
+    await audit(client,auth.schoolId,auth.userId,'migration.batch.submit','migration_batch',parsed.data,{rowCount:rows.rows.length,totalDebitMinor:debits.toString(),totalCreditMinor:credits.toString()});
     return {status:'pending_review',rowCount:rows.rowCount,total:((debits/100n).toString()+'.'+(debits%100n).toString().padStart(2,'0'))};
   });
   res.json(result);
