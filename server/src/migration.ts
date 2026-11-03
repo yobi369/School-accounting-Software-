@@ -134,6 +134,58 @@ migrationRouter.get('/migration/batches/:batchId',wrap(async(req,res)=>{
   res.json(result);
 }));
 
+migrationRouter.get('/migration/batches/:batchId/reconciliation',wrap(async(req,res)=>{
+  const auth=authContext(req);
+  if(!auth.permissions.includes('migration.manage')&&!auth.permissions.includes('migration.approve'))fail('Insufficient permission.',403);
+  const parsed=z.string().uuid().safeParse(req.params.batchId);
+  if(!parsed.success)fail('Invalid migration batch ID.',400);
+  const report=await withSchoolTransaction(auth.schoolId,async client=>{
+    const batch=await client.query(
+      'SELECT id,batch_type,status,effective_date::text,row_count,journal_entry_id FROM migration_batches WHERE school_id=$1 AND id=$2',
+      [auth.schoolId,parsed.data],
+    );
+    if(!batch.rowCount)fail('Migration batch not found.',404);
+    const source=await client.query(
+      `SELECT count(*)::int AS source_rows,
+        count(*) FILTER (WHERE external_reference IS NOT NULL)::int AS referenced_rows,
+        COALESCE(sum((payload->>'debit')::numeric),0)::text AS source_debits,
+        COALESCE(sum((payload->>'credit')::numeric),0)::text AS source_credits
+       FROM migration_batch_rows WHERE school_id=$1 AND batch_id=$2`,
+      [auth.schoolId,parsed.data],
+    );
+    const posted=await client.query(
+      `WITH journal_ids AS (
+        SELECT journal_entry_id FROM migration_batch_postings WHERE school_id=$1 AND batch_id=$2
+        UNION
+        SELECT journal_entry_id FROM migration_batches WHERE school_id=$1 AND id=$2 AND journal_entry_id IS NOT NULL
+      )
+      SELECT count(DISTINCT je.id)::int AS posted_journals,
+        COALESCE(sum(jl.debit),0)::text AS posted_debits,
+        COALESCE(sum(jl.credit),0)::text AS posted_credits
+       FROM journal_ids ji
+       JOIN journal_entries je ON je.school_id=$1 AND je.id=ji.journal_entry_id AND je.status='posted'
+       LEFT JOIN journal_lines jl ON jl.school_id=je.school_id AND jl.journal_entry_id=je.id`,
+      [auth.schoolId,parsed.data],
+    );
+    const expectedJournalCount=batch.rows[0].batch_type==='opening_balances'
+      ? (Number(source.rows[0].source_rows)>0?1:0)
+      : Number((await client.query('SELECT count(DISTINCT transaction_date)::int AS n FROM migration_batch_rows WHERE school_id=$1 AND batch_id=$2',[auth.schoolId,parsed.data])).rows[0].n);
+    const sourceDebits=money(String(source.rows[0].source_debits));
+    const sourceCredits=money(String(source.rows[0].source_credits));
+    const postedDebits=money(String(posted.rows[0].posted_debits));
+    const postedCredits=money(String(posted.rows[0].posted_credits));
+    return {
+      batch:batch.rows[0],
+      source:{rows:Number(source.rows[0].source_rows),rowsWithReferences:Number(source.rows[0].referenced_rows),debits:formatMoney(sourceDebits),credits:formatMoney(sourceCredits)},
+      ledger:{journals:Number(posted.rows[0].posted_journals),debits:formatMoney(postedDebits),credits:formatMoney(postedCredits)},
+      differences:{debits:formatMoney(postedDebits-sourceDebits),credits:formatMoney(postedCredits-sourceCredits)},
+      expectedJournalCount,
+      reconciled:batch.rows[0].status==='posted'&&Number(posted.rows[0].posted_journals)===expectedJournalCount&&postedDebits===sourceDebits&&postedCredits===sourceCredits,
+    };
+  });
+  res.json(report);
+}));
+
 migrationRouter.post('/migration/batches/:batchId/submit',requirePermission('migration.manage'),wrap(async(req,res)=>{
   const auth=authContext(req);
   const parsed=z.string().uuid().safeParse(req.params.batchId);
