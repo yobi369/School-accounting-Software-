@@ -94,7 +94,7 @@ const bootstrapSchema = z.object({
   fullName: z.string().trim().min(2).max(160),
   email: z.string().trim().email().max(254),
   password: z.string().min(12).max(200),
-  financialYearStart: z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/).optional(),
+  financialYearStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 });
 app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
   try {
