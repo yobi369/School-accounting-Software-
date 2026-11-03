@@ -139,7 +139,7 @@ migrationRouter.post('/migration/batches/:batchId/submit',requirePermission('mig
     let debits=0n,credits=0n;
     const historicalTotals=new Map<string,{debit:bigint;credit:bigint}>();
     for(const item of rows.rows){
-      const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string;transactionDate?:string|null};
+      const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string;transactionDate?:string|null;externalReference?:string|null};
       const debit=money(payload.debit),credit=money(payload.credit);
       debits+=debit;credits+=credit;
       if(batch.rows[0].batch_type==='historical_transactions'){
