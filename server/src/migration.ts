@@ -146,25 +146,11 @@ migrationRouter.get('/migration/batches/:batchId/reconciliation',wrap(async(req,
     );
     if(!batch.rowCount)fail('Migration batch not found.',404);
     const source=await client.query(
-      `SELECT count(*)::int AS source_rows,
-        count(*) FILTER (WHERE external_reference IS NOT NULL)::int AS referenced_rows,
-        COALESCE(sum((payload->>'debit')::numeric),0)::text AS source_debits,
-        COALESCE(sum((payload->>'credit')::numeric),0)::text AS source_credits
-       FROM migration_batch_rows WHERE school_id=$1 AND batch_id=$2`,
+      "SELECT count(*)::int AS source_rows, count(*) FILTER (WHERE external_reference IS NOT NULL)::int AS referenced_rows, COALESCE(sum((payload->>'debit')::numeric),0)::text AS source_debits, COALESCE(sum((payload->>'credit')::numeric),0)::text AS source_credits FROM migration_batch_rows WHERE school_id=$1 AND batch_id=$2",
       [auth.schoolId,parsed.data],
     );
     const posted=await client.query(
-      `WITH journal_ids AS (
-        SELECT journal_entry_id FROM migration_batch_postings WHERE school_id=$1 AND batch_id=$2
-        UNION
-        SELECT journal_entry_id FROM migration_batches WHERE school_id=$1 AND id=$2 AND journal_entry_id IS NOT NULL
-      )
-      SELECT count(DISTINCT je.id)::int AS posted_journals,
-        COALESCE(sum(jl.debit),0)::text AS posted_debits,
-        COALESCE(sum(jl.credit),0)::text AS posted_credits
-       FROM journal_ids ji
-       JOIN journal_entries je ON je.school_id=$1 AND je.id=ji.journal_entry_id AND je.status='posted'
-       LEFT JOIN journal_lines jl ON jl.school_id=je.school_id AND jl.journal_entry_id=je.id`,
+      "WITH journal_ids AS (SELECT journal_entry_id FROM migration_batch_postings WHERE school_id=$1 AND batch_id=$2 UNION SELECT journal_entry_id FROM migration_batches WHERE school_id=$1 AND id=$2 AND journal_entry_id IS NOT NULL) SELECT count(DISTINCT je.id)::int AS posted_journals, COALESCE(sum(jl.debit),0)::text AS posted_debits, COALESCE(sum(jl.credit),0)::text AS posted_credits FROM journal_ids ji JOIN journal_entries je ON je.school_id=$1 AND je.id=ji.journal_entry_id AND je.status='posted' LEFT JOIN journal_lines jl ON jl.school_id=je.school_id AND jl.journal_entry_id=je.id",
       [auth.schoolId,parsed.data],
     );
     const expectedJournalCount=batch.rows[0].batch_type==='opening_balances'
