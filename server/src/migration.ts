@@ -84,7 +84,7 @@ migrationRouter.get('/migration/batches',wrap(async(req,res)=>{
   const batchId=z.string().uuid().safeParse(req.params.batchId);
   if(!batchId.success)fail('Invalid migration batch ID.',400);
   const result=await withSchoolTransaction(auth.schoolId,async client=>{
-    const batch=await client.query('SELECT status,batch_type FROM migration_batches WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,batchId.data]);
+    const batch=await client.query('SELECT status,batch_type,effective_date::text FROM migration_batches WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,batchId.data]);
     if(!batch.rowCount)fail('Migration batch not found.',404);
     if(batch.rows[0].status!=='draft')fail('Rows can only be added while a migration batch is in draft.',409);
     const existingRows=await client.query('SELECT COALESCE(MAX(row_number),0)::int AS max_row FROM migration_batch_rows WHERE school_id=$1 AND batch_id=$2',[auth.schoolId,batchId.data]);
@@ -94,6 +94,7 @@ migrationRouter.get('/migration/batches',wrap(async(req,res)=>{
       const debit=money(row.debit),credit=money(row.credit);
       if(debit<0n||credit<0n)fail('Migration debit and credit amounts cannot be negative.',422);
       if(batch.rows[0].batch_type==='historical_transactions'&&!row.transactionDate)fail('Historical transaction rows require their original transaction date.',422);
+      if(batch.rows[0].batch_type==='historical_transactions'&&row.transactionDate!<String(batch.rows[0].effective_date).slice(0,10))fail('Historical activity must be dated before the opening-balance cut-off to prevent double counting.',422);
       if(batch.rows[0].batch_type==='opening_balances'&&(row.transactionDate||row.externalReference))fail('Opening-balance rows cannot include historical transaction metadata.',422);
       if((debit>0n)===(credit>0n))fail('Each row must contain either a positive debit or a positive credit, not both.',422);
       const account=await client.query('SELECT id,code FROM accounts WHERE school_id=$1 AND upper(code)=upper($2) AND is_active=true',[auth.schoolId,row.accountCode]);
