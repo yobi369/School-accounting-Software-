@@ -9,6 +9,7 @@ import { studentProfileEditRouter } from './student-profile-edit.js';
 import { academicTermsRouter } from './academic-terms.js';
 import { payrollRouter } from './payroll.js';
 import { formatMinorUnitsKes, parseKesToMinorUnits, validateJournal } from './domain/ledger.js';
+import { buildFinancialYearCalendar } from './domain/financial-year.js';
 
 const app = express();
 // Configure the known proxy hop count explicitly. Never trust arbitrary forwarded
@@ -94,7 +95,7 @@ const bootstrapSchema = z.object({
   fullName: z.string().trim().min(2).max(160),
   email: z.string().trim().email().max(254),
   password: z.string().min(12).max(200),
-  financialYearStart: z.string().regex(/^\d{4}-01-01$/).optional(),
+  financialYearStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 });
 app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
   try {
@@ -115,9 +116,11 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
     const email = input.email.toLowerCase();
     const schoolCode = input.schoolCode.toUpperCase();
     const passwordHash = await hashPassword(input.password);
-    const currentYear = Number((input.financialYearStart ?? `${new Date().getFullYear()}-01-01`).slice(0, 4));
-    if (currentYear < 2000 || currentYear > 2200) {
-      res.status(400).json({ error: 'Financial year must be a valid year.' });
+    let financialYear: ReturnType<typeof buildFinancialYearCalendar>;
+    try {
+      financialYear = buildFinancialYearCalendar(input.financialYearStart ?? `${new Date().getFullYear()}-01-01`);
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : 'Financial year start date is invalid.' });
       return;
     }
 
@@ -164,14 +167,15 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
       }
       await client.query('INSERT INTO school_memberships (school_id,user_id,role_id) VALUES ($1,$2,$3)', [schoolId,userId,roleIds.school_admin]);
       const yearId = randomUUID();
-      const starts = `${currentYear}-01-01`;
-      const ends = `${currentYear}-12-31`;
-      await client.query('INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)', [yearId,schoolId,String(currentYear),starts,ends]);
-      for (let month=1; month<=12; month++) {
-        const periodStart = `${currentYear}-${String(month).padStart(2,'0')}-01`;
-        const periodEndDate = new Date(Date.UTC(currentYear,month,0));
-        const periodEnd = `${currentYear}-${String(month).padStart(2,'0')}-${String(periodEndDate.getUTCDate()).padStart(2,'0')}`;
-        await client.query('INSERT INTO accounting_periods (school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4)', [schoolId,yearId,periodStart,periodEnd]);
+      await client.query(
+        'INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',
+        [yearId,schoolId,financialYear.name,financialYear.startsOn,financialYear.endsOn],
+      );
+      for (const period of financialYear.periods) {
+        await client.query(
+          'INSERT INTO accounting_periods (school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4)',
+          [schoolId,yearId,period.startsOn,period.endsOn],
+        );
       }
       const accounts = [
         ['1000','Cash on hand','asset'],['1100','Bank account','asset'],['1200','Fees receivable','asset'],
