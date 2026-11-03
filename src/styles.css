@@ -143,3 +143,23 @@
 @media(max-width:390px){.sl-dashboard-filterbar{grid-template-columns:1fr}.sl-dashboard-filterbar label:nth-child(3){grid-column:auto}.sl-action-grid{grid-template-columns:1fr 1fr}.sl-action-card{padding:10px}.sl-dashboard-table th:first-child{width:24%}.sl-dashboard-table th,.sl-dashboard-table td{padding-left:3px;padding-right:3px}.sl-dashboard-table{font-size:9px}}
 
 .sl-fee-tabs{display:flex;flex-wrap:wrap;gap:.55rem;align-items:center;padding:.75rem;position:sticky;top:.25rem;z-index:2;background:var(--panel,#fff)}.sl-fee-tabs button{white-space:nowrap;min-height:2.5rem}.sl-fee-tabs [aria-selected="true"]{box-shadow:0 0 0 2px rgba(30,90,150,.18)}@media(max-width:640px){.sl-fee-tabs{position:static;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.sl-fee-tabs button{width:100%;font-size:.82rem}.sl-fee-tabs button:last-child{grid-column:1/-1}}
+
+/* Clear, date-led financial period controls */
+.sl-period-filterbar{grid-template-columns:minmax(190px,1.15fr) repeat(3,minmax(155px,1fr)) auto;gap:12px;align-items:stretch;padding:15px 16px}
+.sl-period-filter-intro{display:flex;flex-direction:column;justify-content:center;gap:5px;min-width:0;padding:2px 8px 2px 1px}
+.sl-period-kicker{display:block;color:#54836a;font-size:9px;font-weight:800;letter-spacing:1.15px}
+.sl-period-filter-intro strong{font-size:14px;color:#244a38;letter-spacing:-.2px}
+.sl-period-filter-intro small,.sl-period-hint{color:#8a998f;font-size:10px;line-height:1.45;font-weight:400}
+.sl-period-filterbar label,.sl-period-panel label{display:flex;flex-direction:column;justify-content:flex-end;gap:6px;min-width:0;color:#50685a;font-size:11px;font-weight:750}
+.sl-period-filterbar label>span,.sl-period-panel label>span{color:#355844;font-size:11px;font-weight:800}
+.sl-period-filterbar select,.sl-period-panel select{width:100%;min-width:0;min-height:42px;padding:10px 11px;border:1px solid #dce6df;border-radius:9px;background:#fbfdfb;color:#294d39;font:inherit;font-size:11px;outline:none}
+.sl-period-filterbar select:focus,.sl-period-panel select:focus{border-color:#6ca987;box-shadow:0 0 0 3px #6ca98720}
+.sl-period-hint{display:block;min-height:14px}
+.sl-period-clear{align-self:center;min-height:40px;white-space:nowrap}
+.sl-period-panel{grid-template-columns:minmax(180px,1.1fr) repeat(2,minmax(190px,1fr)) auto;align-items:stretch;padding:17px}
+.sl-period-panel>div{align-self:center}
+.sl-period-panel h2{margin:5px 0 4px}
+.sl-period-panel p{margin:0}
+.sl-period-panel .sl-period-clear{align-self:center}
+@media(max-width:1150px){.sl-period-filterbar{grid-template-columns:repeat(2,minmax(0,1fr))}.sl-period-filter-intro{grid-column:1/-1}.sl-period-panel{grid-template-columns:repeat(2,minmax(0,1fr))}.sl-period-panel>div{grid-column:1/-1}}
+@media(max-width:720px){.sl-period-filterbar,.sl-period-panel{grid-template-columns:1fr;gap:10px}.sl-period-filter-intro,.sl-period-panel>div{grid-column:auto}.sl-period-clear{width:100%}}
