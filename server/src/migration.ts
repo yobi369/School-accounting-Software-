@@ -80,6 +80,7 @@ migrationRouter.post('/migration/batches/:batchId/rows',requirePermission('migra
     const inserted=[];
     for(const [index,row] of parsed.data.rows.entries()){
       const debit=money(row.debit),credit=money(row.credit);
+      if(debit<0n||credit<0n)fail('Opening-balance debit and credit amounts cannot be negative.',422);
       if((debit>0n)===(credit>0n))fail('Each row must contain either a positive debit or a positive credit, not both.',422);
       const account=await client.query('SELECT id,code FROM accounts WHERE school_id=$1 AND upper(code)=upper($2) AND is_active=true',[auth.schoolId,row.accountCode]);
       if(!account.rowCount)fail('An account code is missing, inactive, or does not belong to this school: '+row.accountCode,422);
