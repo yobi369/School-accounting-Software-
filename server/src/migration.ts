@@ -106,7 +106,7 @@ migrationRouter.post('/migration/batches/:batchId/rows',requirePermission('migra
     await audit(client,auth.schoolId,auth.userId,'migration.batch.rows.add','migration_batch',batchId.data,{added:inserted.length,total:count.rows[0].n});
     return {inserted:inserted.length,rowCount:count.rows[0].n};
   });
-  res.status(201).json(result);
+  res.status(result.alreadyPosted?200:201).json(result);
 }));
 
 migrationRouter.get('/migration/batches/:batchId',wrap(async(req,res)=>{
@@ -200,6 +200,17 @@ migrationRouter.post('/migration/batches/:batchId/post',requirePermission('migra
   const result=await withSchoolTransaction(auth.schoolId,async client=>{
     const batch=await client.query('SELECT * FROM migration_batches WHERE school_id=$1 AND id=$2 FOR UPDATE',[auth.schoolId,parsed.data]);
     if(!batch.rowCount)fail('Migration batch not found.',404);
+    if(batch.rows[0].status==='posted'){
+      const batchType=String(batch.rows[0].batch_type);
+      if(batchType==='historical_transactions'){
+        const posted=await client.query(
+          'SELECT transaction_date::text,journal_entry_id FROM migration_batch_postings WHERE school_id=$1 AND batch_id=$2 ORDER BY transaction_date',
+          [auth.schoolId,parsed.data],
+        );
+        return {status:'posted',batchType,alreadyPosted:true,journals:posted.rows.map(row=>({date:row.transaction_date,journalEntryId:row.journal_entry_id}))};
+      }
+      return {status:'posted',batchType,alreadyPosted:true,journals:[{date:String(batch.rows[0].effective_date).slice(0,10),journalEntryId:batch.rows[0].journal_entry_id}]};
+    }
     if(batch.rows[0].status!=='approved')fail('A migration batch must be independently approved before posting.',409);
     const rows=await client.query('SELECT payload FROM migration_batch_rows WHERE school_id=$1 AND batch_id=$2 ORDER BY row_number',[auth.schoolId,parsed.data]);
     const batchType=String(batch.rows[0].batch_type);
@@ -241,7 +252,7 @@ migrationRouter.post('/migration/batches/:batchId/post',requirePermission('migra
       [auth.schoolId,parsed.data,primaryJournal.journalEntryId]);
     await audit(client,auth.schoolId,auth.userId,'migration.batch.post','migration_batch',parsed.data,
       {batchType,journals:journalResults});
-    return {status:'posted',batchType,journals:journalResults};
+    return {status:'posted',batchType,alreadyPosted:false,journals:journalResults};
   });
   res.status(201).json(result);
 }));
