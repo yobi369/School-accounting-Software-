@@ -21,7 +21,7 @@ describe('buildFinancialYearCalendar', () => {
   it('clips first and last periods when the year starts mid-month', () => {
     const year = buildFinancialYearCalendar('2026-04-15');
     expect(year.periods[0]).toEqual({ startsOn: '2026-04-15', endsOn: '2026-04-30' });
-    expect(year.periods.at(-1)).toEqual({ startsOn: '2027-04-01', endsOn: '2027-04-14' });
+    expect(year.periods[year.periods.length - 1]).toEqual({ startsOn: '2027-04-01', endsOn: '2027-04-14' });
     expect(year.periods).toHaveLength(13);
   });
 
@@ -29,6 +29,11 @@ describe('buildFinancialYearCalendar', () => {
     const year = buildFinancialYearCalendar('2024-03-01');
     expect(year.endsOn).toBe('2025-02-28');
     expect(year.periods[11]).toEqual({ startsOn: '2025-02-01', endsOn: '2025-02-28' });
+  });
+
+  it('clamps a month-end start date to the final valid day in the next year', () => {
+    const year = buildFinancialYearCalendar('2026-01-31');
+    expect(year.endsOn).toBe('2027-01-30');
   });
 
   it('rejects impossible and out-of-range dates', () => {
