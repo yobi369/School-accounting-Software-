@@ -14,12 +14,12 @@ describe.skipIf(!process.env.DATABASE_URL)('school book migration database contr
         reviewer,'migration-reviewer-'+code.toLowerCase()+'@example.test','Migration Reviewer',
       ]);
       await client.query(
-        "INSERT INTO migration_batches (id,school_id,batch_type,status,effective_date,description,source_label,created_by) VALUES ($1,$2,'opening_balances','draft','2026-01-01','Opening balances at migration cut-off','Paper cashbook',$3)",
+        "INSERT INTO migration_batches (id,school_id,batch_type,status,effective_date,description,source_label,created_by) VALUES ($1,$2,'historical_transactions','draft','2026-01-01','Opening balances at migration cut-off','Paper cashbook',$3)",
         [batchId,schoolA,creator],
       );
       await client.query(
-        "INSERT INTO migration_batch_rows (school_id,batch_id,row_number,fingerprint,payload) VALUES ($1,$2,1,$3,$4::jsonb)",
-        [schoolA,batchId,'a'.repeat(64),JSON.stringify({accountCode:'1000',debit:'100.00',credit:'0.00'})],
+        "INSERT INTO migration_batch_rows (school_id,batch_id,row_number,transaction_date,external_reference,fingerprint,payload) VALUES ($1,$2,1,'2025-12-15','CASHBOOK-REF-001',$3,$4::jsonb)",
+        [schoolA,batchId,'a'.repeat(64),JSON.stringify({accountCode:'1000',debit:'100.00',credit:'0.00',transactionDate:'2025-12-15',externalReference:'CASHBOOK-REF-001'})],
       );
       await client.query("UPDATE migration_batches SET status='pending_review',row_count=1,submitted_at=now() WHERE school_id=$1 AND id=$2",[schoolA,batchId]);
     });
@@ -59,6 +59,10 @@ describe.skipIf(!process.env.DATABASE_URL)('school book migration database contr
       client.query('SELECT status,row_count FROM migration_batches WHERE school_id=$1 AND id=$2',[schoolA,batchId]),
     );
     expect(own.rows[0]).toMatchObject({status:'approved',row_count:1});
+    const source=await withSchoolTransaction(schoolA,client=>client.query(
+      'SELECT transaction_date::text,external_reference FROM migration_batch_rows WHERE school_id=$1 AND batch_id=$2',[schoolA,batchId],
+    ));
+    expect(source.rows[0]).toMatchObject({transaction_date:'2025-12-15',external_reference:'CASHBOOK-REF-001'});
   });
 });
 afterAll(async()=>{await pool?.end();});
