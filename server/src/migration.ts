@@ -39,7 +39,7 @@ const reviewSchema=z.object({decision:z.enum(['approved','rejected']),note:z.str
 function formatMoney(minor:bigint):string {
   return (minor/100n).toString()+'.'+(minor%100n).toString().padStart(2,'0');
 }
-function rowFingerprint(row:z.infer<typeof rowSchema>):string {
+function rowFingerprint(row:{accountCode:string;debit:string;credit:string;memo?:string;transactionDate?:string|null;externalReference?:string|null}):string {
   return createHash('sha256').update(JSON.stringify({
     accountCode:row.accountCode.toUpperCase(),
     debit:row.debit,
