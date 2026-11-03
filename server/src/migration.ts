@@ -33,6 +33,9 @@ const rowSchema=z.object({
 const addRowsSchema=z.object({rows:z.array(rowSchema).min(1).max(500)});
 const reviewSchema=z.object({decision:z.enum(['approved','rejected']),note:z.string().trim().max(1000).optional()});
 
+function formatMoney(minor:bigint):string {
+  return (minor/100n).toString()+'.'+(minor%100n).toString().padStart(2,'0');
+}
 function rowFingerprint(row:z.infer<typeof rowSchema>):string {
   return createHash('sha256').update(JSON.stringify({
     accountCode:row.accountCode.toUpperCase(),
@@ -80,8 +83,9 @@ migrationRouter.post('/migration/batches/:batchId/rows',requirePermission('migra
       if((debit>0n)===(credit>0n))fail('Each row must contain either a positive debit or a positive credit, not both.',422);
       const account=await client.query('SELECT id,code FROM accounts WHERE school_id=$1 AND upper(code)=upper($2) AND is_active=true',[auth.schoolId,row.accountCode]);
       if(!account.rowCount)fail('An account code is missing, inactive, or does not belong to this school: '+row.accountCode,422);
-      const payload={accountCode:String(account.rows[0].code),debit:row.debit,credit:row.credit,memo:row.memo??''};
-      const fingerprint=rowFingerprint({...row,accountCode:String(account.rows[0].code)});
+      const normalized={accountCode:String(account.rows[0].code),debit:formatMoney(debit),credit:formatMoney(credit),memo:row.memo??''};
+      const payload=normalized;
+      const fingerprint=rowFingerprint(normalized);
       const saved=await client.query(
         'INSERT INTO migration_batch_rows (school_id,batch_id,row_number,fingerprint,payload) VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (school_id,batch_id,fingerprint) DO NOTHING RETURNING id,row_number',
         [auth.schoolId,batchId.data,firstRowNumber+index,fingerprint,JSON.stringify(payload)],
