@@ -84,7 +84,7 @@ CREATE POLICY migration_approvals_tenant_isolation ON migration_batch_approvals
   WITH CHECK (school_id = shuleledger_current_school_id());
 
 CREATE OR REPLACE FUNCTION enforce_migration_approval_separation()
-RETURNS trigger LANGUAGE plpgsql AS $
+RETURNS trigger LANGUAGE plpgsql AS $migration_guard$
 DECLARE
   v_creator uuid;
   v_status text;
@@ -103,7 +103,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$;
+$migration_guard$;
 CREATE TRIGGER migration_approval_separation
 BEFORE INSERT ON migration_batch_approvals
 FOR EACH ROW EXECUTE FUNCTION enforce_migration_approval_separation();
