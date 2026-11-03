@@ -83,6 +83,62 @@ CREATE POLICY migration_approvals_tenant_isolation ON migration_batch_approvals
   USING (school_id = shuleledger_current_school_id())
   WITH CHECK (school_id = shuleledger_current_school_id());
 
+CREATE OR REPLACE FUNCTION enforce_migration_batch_transition()
+RETURNS trigger LANGUAGE plpgsql AS $migration_batch_guard$
+BEGIN
+  IF OLD.status <> NEW.status AND NOT (
+    (OLD.status='draft' AND NEW.status='pending_review')
+    OR (OLD.status='pending_review' AND NEW.status IN ('approved','rejected'))
+    OR (OLD.status='approved' AND NEW.status='posted')
+  ) THEN
+    RAISE EXCEPTION 'Invalid migration batch state transition'
+      USING ERRCODE = '23514';
+  END IF;
+  IF OLD.status <> 'draft' AND (
+    NEW.batch_type IS DISTINCT FROM OLD.batch_type
+    OR NEW.effective_date IS DISTINCT FROM OLD.effective_date
+    OR NEW.description IS DISTINCT FROM OLD.description
+    OR NEW.source_label IS DISTINCT FROM OLD.source_label
+    OR NEW.row_count IS DISTINCT FROM OLD.row_count
+    OR NEW.created_by IS DISTINCT FROM OLD.created_by
+  ) THEN
+    RAISE EXCEPTION 'Submitted migration batch details are immutable'
+      USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$migration_batch_guard$;
+CREATE TRIGGER migration_batch_transition_guard
+BEFORE UPDATE ON migration_batches
+FOR EACH ROW EXECUTE FUNCTION enforce_migration_batch_transition();
+
+CREATE OR REPLACE FUNCTION enforce_migration_row_draft_only()
+RETURNS trigger LANGUAGE plpgsql AS $migration_row_guard$
+DECLARE
+  v_batch_id uuid;
+  v_school_id uuid;
+  v_status text;
+BEGIN
+  v_batch_id := CASE WHEN TG_OP='DELETE' THEN OLD.batch_id ELSE NEW.batch_id END;
+  v_school_id := CASE WHEN TG_OP='DELETE' THEN OLD.school_id ELSE NEW.school_id END;
+  SELECT status INTO v_status FROM migration_batches
+    WHERE school_id=v_school_id AND id=v_batch_id FOR UPDATE;
+  IF v_status IS DISTINCT FROM 'draft' THEN
+    RAISE EXCEPTION 'Migration rows can only be changed while the batch is draft'
+      USING ERRCODE = '55000';
+  END IF;
+  IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+  IF TG_OP='UPDATE' AND (NEW.school_id<>OLD.school_id OR NEW.batch_id<>OLD.batch_id) THEN
+    RAISE EXCEPTION 'Migration rows cannot be moved between batches'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$migration_row_guard$;
+CREATE TRIGGER migration_row_draft_only
+BEFORE INSERT OR UPDATE OR DELETE ON migration_batch_rows
+FOR EACH ROW EXECUTE FUNCTION enforce_migration_row_draft_only();
+
 CREATE OR REPLACE FUNCTION enforce_migration_approval_separation()
 RETURNS trigger LANGUAGE plpgsql AS $migration_guard$
 DECLARE
