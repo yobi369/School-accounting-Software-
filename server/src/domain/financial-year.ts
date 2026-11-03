@@ -25,7 +25,10 @@ function dateString(date: Date): string {
 
 export function buildFinancialYearCalendar(startDate: string): FinancialYearCalendar {
   const start = parseDateOnly(startDate);
-  const endExclusive = new Date(Date.UTC(start.getUTCFullYear() + 1, start.getUTCMonth(), start.getUTCDate()));
+  const targetYear = start.getUTCFullYear() + 1;
+  const targetMonth = start.getUTCMonth();
+  const lastTargetDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+  const endExclusive = new Date(Date.UTC(targetYear, targetMonth, Math.min(start.getUTCDate(), lastTargetDay)));
   const end = new Date(endExclusive.getTime() - 24 * 60 * 60 * 1000);
   const startsOn = dateString(start);
   const endsOn = dateString(end);
