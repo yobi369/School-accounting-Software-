@@ -197,21 +197,46 @@ migrationRouter.post('/migration/batches/:batchId/post',requirePermission('migra
     if(!batch.rowCount)fail('Migration batch not found.',404);
     if(batch.rows[0].status!=='approved')fail('A migration batch must be independently approved before posting.',409);
     const rows=await client.query('SELECT payload FROM migration_batch_rows WHERE school_id=$1 AND batch_id=$2 ORDER BY row_number',[auth.schoolId,parsed.data]);
-    const postingLines=rows.rows.map(item=>{
-      const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string};
-      return {accountCode:payload.accountCode,debit:payload.debit,credit:payload.credit,memo:payload.memo};
-    });
-    const journal=await postJournal(
-      client,auth.schoolId,auth.userId,String(batch.rows[0].effective_date).slice(0,10),
-      'Opening balances migration: '+String(batch.rows[0].description),
-      'migration_opening_balance',parsed.data,postingLines,
-    );
+    const batchType=String(batch.rows[0].batch_type);
+    const journalResults:Array<{journalEntryId:string;entryNumber:string;date:string}>=[];
+    if(batchType==='opening_balances'){
+      const postingLines=rows.rows.map(item=>{
+        const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string};
+        return {accountCode:payload.accountCode,debit:payload.debit,credit:payload.credit,memo:payload.memo};
+      });
+      const date=String(batch.rows[0].effective_date).slice(0,10);
+      const journal=await postJournal(client,auth.schoolId,auth.userId,date,
+        'Opening balances migration: '+String(batch.rows[0].description),
+        'migration_opening_balance',parsed.data,postingLines);
+      journalResults.push({journalEntryId:journal.id,entryNumber:journal.entryNumber,date});
+    } else {
+      const grouped=new Map<string,Array<{accountCode:string;debit:string;credit:string;memo?:string}>>();
+      for(const item of rows.rows){
+        const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string;transactionDate?:string|null};
+        if(!payload.transactionDate)fail('Historical transaction row is missing its original date.',422);
+        const date=payload.transactionDate;
+        const lines=grouped.get(date)??[];
+        lines.push({accountCode:payload.accountCode,debit:payload.debit,credit:payload.credit,memo:payload.memo});
+        grouped.set(date,lines);
+      }
+      for(const date of [...grouped.keys()].sort()){
+        const sourceId=randomUUID();
+        const journal=await postJournal(client,auth.schoolId,auth.userId,date,
+          'Historical migration: '+String(batch.rows[0].description)+' ('+date+')',
+          'migration_historical_transaction',sourceId,grouped.get(date)!);
+        await client.query(
+          'INSERT INTO migration_batch_postings (school_id,batch_id,transaction_date,source_id,journal_entry_id) VALUES ($1,$2,$3,$4,$5)',
+          [auth.schoolId,parsed.data,date,sourceId,journal.id]);
+        journalResults.push({journalEntryId:journal.id,entryNumber:journal.entryNumber,date});
+      }
+    }
+    const primaryJournal=journalResults[0];
     await client.query(
       "UPDATE migration_batches SET status='posted',posted_at=now(),journal_entry_id=$3,updated_at=now() WHERE school_id=$1 AND id=$2",
-      [auth.schoolId,parsed.data,journal.id],
-    );
-    await audit(client,auth.schoolId,auth.userId,'migration.batch.post','migration_batch',parsed.data,{journalEntryId:journal.id,entryNumber:journal.entryNumber});
-    return {status:'posted',journalEntryId:journal.id,entryNumber:journal.entryNumber};
+      [auth.schoolId,parsed.data,primaryJournal.journalEntryId]);
+    await audit(client,auth.schoolId,auth.userId,'migration.batch.post','migration_batch',parsed.data,
+      {batchType,journals:journalResults});
+    return {status:'posted',batchType,journals:journalResults};
   });
   res.status(201).json(result);
 }));
