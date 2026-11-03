@@ -235,7 +235,7 @@ migrationRouter.post('/migration/batches/:batchId/post',requirePermission('migra
     } else {
       const grouped=new Map<string,Array<{accountCode:string;debit:string;credit:string;memo?:string}>>();
       for(const item of rows.rows){
-        const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string;transactionDate?:string|null};
+        const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string;transactionDate?:string|null;externalReference?:string|null};
         if(!payload.transactionDate)fail('Historical transaction row is missing its original date.',422);
         const date=payload.transactionDate;
         const lines=grouped.get(date)??[];
@@ -422,7 +422,7 @@ migrationRouter.post('/migration/batches/:batchId/post',requirePermission('migra
     } else {
       const grouped=new Map<string,Array<{accountCode:string;debit:string;credit:string;memo?:string}>>();
       for(const item of rows.rows){
-        const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string;transactionDate?:string|null};
+        const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string;transactionDate?:string|null;externalReference?:string|null};
         if(!payload.transactionDate)fail('Historical transaction row is missing its original date.',422);
         const date=payload.transactionDate;
         const lines=grouped.get(date)??[];
@@ -617,7 +617,7 @@ migrationRouter.post('/migration/batches/:batchId/post',requirePermission('migra
     } else {
       const grouped=new Map<string,Array<{accountCode:string;debit:string;credit:string;memo?:string}>>();
       for(const item of rows.rows){
-        const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string;transactionDate?:string|null};
+        const payload=item.payload as {accountCode:string;debit:string;credit:string;memo?:string;transactionDate?:string|null;externalReference?:string|null};
         if(!payload.transactionDate)fail('Historical transaction row is missing its original date.',422);
         const date=payload.transactionDate;
         const lines=grouped.get(date)??[];
