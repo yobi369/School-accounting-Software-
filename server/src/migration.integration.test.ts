@@ -14,14 +14,23 @@ describe.skipIf(!process.env.DATABASE_URL)('school book migration database contr
         reviewer,'migration-reviewer-'+code.toLowerCase()+'@example.test','Migration Reviewer',
       ]);
       await client.query(
-        "INSERT INTO migration_batches (id,school_id,batch_type,status,effective_date,description,source_label,created_by,submitted_at) VALUES ($1,$2,'opening_balances','pending_review','2026-01-01','Opening balances at migration cut-off','Paper cashbook',$3,now())",
+        "INSERT INTO migration_batches (id,school_id,batch_type,status,effective_date,description,source_label,created_by,submitted_at) VALUES ($1,$2,'opening_balances','draft','2026-01-01','Opening balances at migration cut-off','Paper cashbook',$3,now())",
         [batchId,schoolA,creator],
       );
       await client.query(
         "INSERT INTO migration_batch_rows (school_id,batch_id,row_number,fingerprint,payload) VALUES ($1,$2,1,$3,$4::jsonb)",
         [schoolA,batchId,'a'.repeat(64),JSON.stringify({accountCode:'1000',debit:'100.00',credit:'0.00'})],
       );
+      await client.query("UPDATE migration_batches SET status='pending_review',submitted_at=now() WHERE school_id=$1 AND id=$2",[schoolA,batchId]);
     });
+    await expect(withSchoolTransaction(schoolA,client=>client.query(
+      "UPDATE migration_batch_rows SET payload='{}'::jsonb WHERE school_id=$1 AND batch_id=$2",
+      [schoolA,batchId],
+    ))).rejects.toThrow(/only be changed while the batch is draft/i);
+    await expect(withSchoolTransaction(schoolA,client=>client.query(
+      "UPDATE migration_batches SET effective_date='2026-02-01' WHERE school_id=$1 AND id=$2",
+      [schoolA,batchId],
+    ))).rejects.toThrow(/details are immutable/i);
     await expect(withSchoolTransaction(schoolA,client=>client.query(
       "INSERT INTO migration_batch_approvals (school_id,batch_id,reviewer_user_id,decision) VALUES ($1,$2,$3,'approved')",
       [schoolA,batchId,creator],
