@@ -95,8 +95,8 @@ migrationRouter.post('/migration/batches/:batchId/rows',requirePermission('migra
       const payload=normalized;
       const fingerprint=rowFingerprint(normalized);
       const saved=await client.query(
-        'INSERT INTO migration_batch_rows (school_id,batch_id,row_number,fingerprint,payload) VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (school_id,batch_id,fingerprint) DO NOTHING RETURNING id,row_number',
-        [auth.schoolId,batchId.data,firstRowNumber+index,fingerprint,JSON.stringify(payload)],
+        'INSERT INTO migration_batch_rows (school_id,batch_id,row_number,transaction_date,external_reference,fingerprint,payload) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (school_id,batch_id,fingerprint) DO NOTHING RETURNING id,row_number',
+        [auth.schoolId,batchId.data,firstRowNumber+index,normalized.transactionDate,normalized.externalReference,fingerprint,JSON.stringify(payload)],
       );
       if(!saved.rowCount)fail('A duplicate opening-balance row was detected in this batch.',409);
       inserted.push(saved.rows[0]);
@@ -150,11 +150,16 @@ migrationRouter.post('/migration/batches/:batchId/submit',requirePermission('mig
     }
     if(debits<=0n||debits!==credits)fail('Migration batch must have equal, positive total debits and credits.',422);
     for(const [date,total] of historicalTotals){if(total.debit<=0n||total.debit!==total.credit)fail('Historical entries must balance separately for each transaction date: '+date,422);}
-    const period=await client.query(
-      "SELECT p.id FROM financial_years y JOIN accounting_periods p ON p.school_id=y.school_id AND p.financial_year_id=y.id WHERE y.school_id=$1 AND y.status='open' AND p.status='open' AND y.starts_on<=$2::date AND y.ends_on>=$2::date AND p.starts_on<=$2::date AND p.ends_on>=$2::date",
-      [auth.schoolId,batch.rows[0].effective_date],
-    );
-    if(!period.rowCount)fail('The opening-balance date must fall within an open financial year and accounting period.',422);
+    const postingDates=batch.rows[0].batch_type==='opening_balances'
+      ? [String(batch.rows[0].effective_date).slice(0,10)]
+      : [...historicalTotals.keys()];
+    for(const postingDate of postingDates){
+      const period=await client.query(
+        "SELECT p.id FROM financial_years y JOIN accounting_periods p ON p.school_id=y.school_id AND p.financial_year_id=y.id WHERE y.school_id=$1 AND y.status='open' AND p.status='open' AND y.starts_on<=$2::date AND y.ends_on>=$2::date AND p.starts_on<=$2::date AND p.ends_on>=$2::date",
+        [auth.schoolId,postingDate],
+      );
+      if(!period.rowCount)fail('Posting date '+postingDate+' must fall within an open financial year and accounting period.',422);
+    }
     await client.query("UPDATE migration_batches SET status='pending_review',submitted_at=now(),updated_at=now() WHERE school_id=$1 AND id=$2",[auth.schoolId,parsed.data]);
     await audit(client,auth.schoolId,auth.userId,'migration.batch.submit','migration_batch',parsed.data,{rowCount:rows.rows.length,totalDebitMinor:debits.toString(),totalCreditMinor:credits.toString()});
     return {status:'pending_review',rowCount:rows.rowCount,total:((debits/100n).toString()+'.'+(debits%100n).toString().padStart(2,'0'))};
@@ -216,7 +221,7 @@ migrationRouter.post('/migration/batches/:batchId/post',requirePermission('migra
         if(!payload.transactionDate)fail('Historical transaction row is missing its original date.',422);
         const date=payload.transactionDate;
         const lines=grouped.get(date)??[];
-        lines.push({accountCode:payload.accountCode,debit:payload.debit,credit:payload.credit,memo:payload.memo});
+        lines.push({accountCode:payload.accountCode,debit:payload.debit,credit:payload.credit,memo:[payload.memo,payload.externalReference?'Source ref: '+payload.externalReference:''].filter(Boolean).join(' · ')});
         grouped.set(date,lines);
       }
       for(const date of [...grouped.keys()].sort()){
