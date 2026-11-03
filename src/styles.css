@@ -187,3 +187,11 @@
 .sl-period-status.is-open{background:#e8f4eb;color:#32734b}
 .sl-period-register-state .sl-outline{white-space:nowrap}
 @media(max-width:760px){.sl-period-selection{grid-template-columns:1fr}.sl-period-register-row{grid-template-columns:1fr;gap:10px}.sl-period-register-state{justify-content:space-between}.sl-period-register-state .sl-outline{flex:1}.sl-period-register-head{align-items:flex-start}.sl-period-register-count{font-size:9px}}
+
+/* Custom multi-month reporting range controls */
+.sl-period-filterbar{grid-template-columns:repeat(3,minmax(0,1fr))}
+.sl-period-filterbar .sl-period-filter-intro{grid-column:1/-1}
+.sl-period-filterbar .sl-period-clear{grid-column:1/-1;justify-self:end}
+.sl-period-filterbar input[type=date],.sl-period-panel input[type=date]{width:100%;min-width:0;min-height:42px;padding:9px 10px;border:1px solid #dce6df;border-radius:9px;background:#fbfdfb;color:#294d39;font:inherit;font-size:11px}
+.sl-period-filterbar input[type=date]:focus,.sl-period-panel input[type=date]:focus{border-color:#6ca987;outline:none;box-shadow:0 0 0 3px #6ca98720}
+@media(max-width:720px){.sl-period-filterbar{grid-template-columns:1fr}.sl-period-filterbar .sl-period-filter-intro,.sl-period-filterbar .sl-period-clear{grid-column:auto}.sl-period-filterbar .sl-period-clear{justify-self:stretch}}
