@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { authContext, createSession, hashPassword, hashToken, requireAuth, requirePermission, safeSecretEquals, verifyPassword } from './auth.js';
 import { pool, requirePool, withSchoolTransaction } from './db.js';
 import { operationsRouter } from './operations.js';
+import { migrationRouter } from './migration.js';
 import { studentProfileEditRouter } from './student-profile-edit.js';
 import { academicTermsRouter } from './academic-terms.js';
 import { payrollRouter } from './payroll.js';
@@ -563,6 +564,7 @@ app.use('/api/v1', studentProfileEditRouter);
 app.use('/api/v1', academicTermsRouter);
 app.use('/api/v1', payrollRouter);
 app.use('/api/v1', operationsRouter);
+app.use('/api/v1', migrationRouter);
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(resolve(process.cwd(), 'dist'), { index: false, maxAge: '1h' }));
   app.get(/.*/, (req, res, next) => {
