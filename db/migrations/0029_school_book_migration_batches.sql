@@ -48,6 +48,33 @@ CREATE TABLE migration_batch_rows (
   UNIQUE (school_id,batch_id,fingerprint)
 );
 CREATE INDEX migration_batch_rows_batch_idx ON migration_batch_rows(school_id,batch_id,row_number);
+
+-- Historical batches may create one journal per original transaction date.
+-- This mapping preserves traceability while the batch remains the review unit.
+CREATE TABLE migration_batch_postings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL,
+  batch_id uuid NOT NULL,
+  transaction_date date NOT NULL,
+  source_id uuid NOT NULL UNIQUE,
+  journal_entry_id uuid NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (school_id,batch_id) REFERENCES migration_batches(school_id,id) ON DELETE RESTRICT,
+  FOREIGN KEY (school_id,journal_entry_id) REFERENCES journal_entries(school_id,id) ON DELETE RESTRICT,
+  UNIQUE (school_id,batch_id,transaction_date)
+);
+ALTER TABLE migration_batch_postings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE migration_batch_postings FORCE ROW LEVEL SECURITY;
+CREATE POLICY migration_batch_postings_tenant_isolation ON migration_batch_postings
+  USING (school_id = shuleledger_current_school_id())
+  WITH CHECK (school_id = shuleledger_current_school_id());
+DO $
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='shuleledger_app') THEN
+    GRANT SELECT,INSERT ON migration_batch_postings TO shuleledger_app;
+  END IF;
+END $;
+
 CREATE INDEX migration_batch_rows_reference_idx ON migration_batch_rows(school_id,external_reference)
   WHERE external_reference IS NOT NULL;
 
