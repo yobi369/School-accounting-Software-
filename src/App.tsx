@@ -12,6 +12,7 @@ type Field={
 };
 const navigation=[
   {id:'overview',label:'Overview',icon:'⌂'},
+  {id:'schools',label:'Create school',icon:'+'},
   {id:'students',label:'Students',icon:'♙'},
   {id:'fees',label:'Fees & receipts',icon:'KSh'},
   {id:'expenses',label:'Expenses & approvals',icon:'↗'},
@@ -207,6 +208,7 @@ function Workspace({session,onLogout,onSwitch}:{session:SchoolSession;onLogout:(
   const [csv,setCsv]=useState('date,description,reference,amount\n');
   const [selectedBank,setSelectedBank]=useState('');
   const [workspaces,setWorkspaces]=useState<{school_id:string;school_name:string;role_name:string}[]>([]);
+  const [canCreateSchool,setCanCreateSchool]=useState(false);
   const [report,setReport]=useState<Row[]>([]);
   const [periodContext,setPeriodContext]=useState<Row[]>([]);
   const [selectedYearId,setSelectedYearId]=useState('');
@@ -250,6 +252,7 @@ function Workspace({session,onLogout,onSwitch}:{session:SchoolSession;onLogout:(
   useEffect(()=>{void apiRequest<{periods:Row[]}>('/accounting/periods',session).then(r=>{setPeriodContext(r.periods);const years=[...new Set(r.periods.map(p=>String(p.financial_year_id)))];if(years.length)setSelectedYearId(current=>current||years[0]);}).catch(()=>setPeriodContext([]));},[session]);
   useEffect(()=>{if(selectedPeriodId){const chosen=periodContext.find(p=>String(p.period_id)===selectedPeriodId);if(chosen&&String(chosen.financial_year_id)!==selectedYearId)setSelectedYearId(String(chosen.financial_year_id));}},[selectedPeriodId,selectedYearId,periodContext]);
   useEffect(()=>{void apiRequest<{workspaces:{school_id:string;school_name:string;role_name:string}[]}>('/auth/workspaces',session).then(r=>setWorkspaces(r.workspaces)).catch(()=>setWorkspaces([]));},[session]);
+  useEffect(()=>{void apiRequest<{canCreateSchool:boolean}>('/platform/access',session).then(r=>setCanCreateSchool(r.canCreateSchool)).catch(()=>setCanCreateSchool(false));},[session]);
   useEffect(()=>{const update=()=>setOnline(navigator.onLine);window.addEventListener('online',update);window.addEventListener('offline',update);void refreshOffline();return()=>{window.removeEventListener('online',update);window.removeEventListener('offline',update);};},[refreshOffline]);
   const rows=(key:string):Row[]=>Array.isArray(data[key])?data[key] as Row[]:[];
   const students=rows('students');const invoices=rows('invoices');const arrears=rows('arrears');const classes=rows('classes');const feeItems=rows('feeItems');const credits=rows('credits');const accounts=rows('accounts');const expenses=rows('expenses');const periods=rows('periods');const banks=rows('accounts');const users=rows('users');const journals=rows('journals');const events=rows('events');const waivers=rows('waivers');const receipts=rows('receipts');const structures=rows('structures');const suppliers=rows('suppliers');const budgets=rows('budgets');const payrollStaff=rows('staff');const payrollRuns=rows('payrollRuns');const academicYears=rows('academicYears');const statementLines=rows('statementLines');const journalLineRows=rows('journalLines');const roles=rows('roles');const permissions=rows('permissions');const migrationBatches=rows('batches');
@@ -282,11 +285,23 @@ function Workspace({session,onLogout,onSwitch}:{session:SchoolSession;onLogout:(
   return <div className="sl-shell">
     <aside className="sl-sidebar"><div className="sl-brand"><div className="sl-brand-mark">P</div><div><b>Precious SchoolBooks</b><small>SCHOOL FINANCE, CLEARLY</small></div></div>
       <div className="sl-school"><span className="sl-school-avatar">{session.school.name.slice(0,1).toUpperCase()}</span><div><b>{session.school.name}</b><small>{session.role??'School workspace'}</small></div></div>
-      <nav className="sl-nav">{navigation.map(n=><button key={n.id} className={active===n.id?'selected':''} onClick={()=>{setActive(n.id);setReport([]);setNotice('');}}><span>{n.icon}</span>{n.label}</button>)}</nav>
+      <nav className="sl-nav">{navigation.filter(n=>n.id!=='schools'||canCreateSchool).map(n=><button key={n.id} className={active===n.id?'selected':''} onClick={()=>{setActive(n.id);setReport([]);setNotice('');}}><span>{n.icon}</span>{n.label}</button>)}</nav>
       <div className="sl-side-foot"><span className={online?'sl-online':'sl-offline'}></span>{online?'Online':'Offline'} · {offlineItems.length} local drafts</div>
     </aside>
     <main className="sl-main"><header className="sl-topbar"><div><small>School workspace /</small><b>{title}</b></div><div className="sl-top-actions"><span>{session.user.fullName}</span>{workspaces.length>1&&<select className="sl-workspace-select" aria-label="Switch school workspace" value={session.school.id} onChange={async e=>{try{const switched=await apiRequest<SchoolSession>('/auth/switch-workspace',session,{method:'POST',body:JSON.stringify({schoolId:e.target.value})});saveSession(switched);onSwitch(switched);}catch(err){setError(err instanceof Error?err.message:'Workspace switch failed.');}}}>{workspaces.map(w=><option key={w.school_id} value={w.school_id}>{w.school_name}</option>)}</select>}<button className="sl-outline" onClick={async()=>{try{await apiRequest('/auth/logout',session,{method:'POST'});}catch{}onLogout();}}>Sign out</button></div></header>
       <section className="sl-content"><div className="sl-page-head"><div><p className="sl-eyebrow">PRECIOUS SCHOOLBOOKS · KES · AFRICA/NAIROBI</p><h1>{title}</h1><p className="sl-muted">School records are loaded from the authenticated server workspace.</p></div><button className="sl-outline" onClick={()=>void load(active)} disabled={busy}>↻ Refresh</button></div>
+        {active==='schools'&&canCreateSchool&&<div className="sl-panel">
+          <h2>Create another school workspace</h2>
+          <p className="sl-muted">Only the original platform administrator can create additional schools. Your current account will become the first school administrator in the new workspace. Bootstrap is not used again.</p>
+          <DynamicForm title="New school details" submitLabel="Create school and open workspace" fields={[
+            {name:'schoolName',label:'School name',placeholder:'e.g. Precious Academy'},
+            {name:'schoolCode',label:'Unique school code',placeholder:'e.g. PRECIOUS-02'},
+            {name:'financialYearStart',label:'Financial year start (optional)',type:'date',required:false,defaultValue:new Date().getFullYear()+'-01-01'}
+          ]} onSubmit={async values=>{
+            const created=await apiRequest<SchoolSession & {message:string}>('/platform/schools',session,{method:'POST',body:JSON.stringify({schoolName:values.schoolName,schoolCode:values.schoolCode,financialYearStart:values.financialYearStart||undefined})});
+            saveSession(created);onSwitch(created);setActive('overview');setNotice(created.message||'New school created.');
+          }}/>
+        </div>}
         {active==='overview'?<div className="sl-dashboard-filterbar sl-period-filterbar">
           <div className="sl-period-filter-intro"><span className="sl-period-kicker">REPORTING CONTROLS</span><strong>Choose your reporting dates</strong><small>Financial dates and school terms are kept separate.</small></div>
           <label><span>Financial year</span><select value={selectedYearId} onChange={e=>{setSelectedYearId(e.target.value);setSelectedPeriodId('');}}><option value="">All financial years</option>{contextYears.map(y=><option key={y.value} value={y.value}>{y.label} · {formatDateRange(y.starts,y.ends)}</option>)}</select><small className="sl-period-hint">Full-year reporting window</small></label>
