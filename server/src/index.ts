@@ -320,6 +320,96 @@ app.post('/api/v1/auth/accept-invitation',requireAuth,async(req,res,next)=>{
   }catch(error){next(error);}
 });
 
+
+const createSchoolSchema = z.object({
+  schoolName: z.string().trim().min(2).max(160),
+  schoolCode: z.string().trim().min(2).max(24).regex(/^[a-zA-Z0-9_-]+$/),
+  financialYearStart: z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/).optional(),
+});
+app.get('/api/v1/platform/access',requireAuth,async(req,res,next)=>{
+  try{
+    const auth=authContext(req);
+    if(auth.mustChangePassword){res.json({canCreateSchool:false});return;}
+    const result=await withSchoolTransaction(auth.schoolId,client=>
+      client.query('SELECT 1 FROM platform_administrators WHERE user_id=$1',[auth.userId]));
+    res.json({canCreateSchool:result.rowCount===1});
+  }catch(error){next(error);}
+});
+app.post('/api/v1/platform/schools',requireAuth,async(req,res,next)=>{
+  try{
+    const auth=authContext(req);
+    if(auth.mustChangePassword){res.status(403).json({error:'Change your initial password before creating another school.'});return;}
+    const parsed=createSchoolSchema.safeParse(req.body);
+    if(!parsed.success){res.status(400).json({error:'Invalid school details.',details:parsed.error.flatten()});return;}
+    const access=await withSchoolTransaction(auth.schoolId,client=>
+      client.query('SELECT 1 FROM platform_administrators WHERE user_id=$1',[auth.userId]));
+    if(access.rowCount!==1){res.status(403).json({error:'Only the original platform administrator can create additional schools.'});return;}
+    const input=parsed.data;
+    const schoolId=randomUUID();
+    const schoolCode=input.schoolCode.toUpperCase();
+    let financialYear:ReturnType<typeof buildFinancialYearCalendar>;
+    try{financialYear=buildFinancialYearCalendar(input.financialYearStart??`${new Date().getFullYear()}-01-01`);}
+    catch(error){res.status(400).json({error:error instanceof Error?error.message:'Financial year start date is invalid.'});return;}
+    const permissionCodes=[
+      'school.manage','users.manage','bank.manage','students.read','students.create','students.manage','fees.read','fees.manage',
+      'receipts.create','ledger.read','ledger.post','expenses.read','expenses.create','expenses.approve','expenses.pay',
+      'bank.read','bank.reconcile','reports.read','reports.export','periods.manage','audit.read','payroll.read',
+      'payroll.manage','payroll.approve','payroll.pay','migration.manage','migration.approve',
+    ];
+    const rolePermissions:Record<string,string[]>={
+      school_admin:permissionCodes,
+      accountant:['students.read','fees.read','receipts.create','ledger.read','ledger.post','expenses.read','expenses.create','bank.read','bank.reconcile','reports.read','reports.export','audit.read','payroll.read','payroll.pay','migration.manage'],
+      bursar:['students.read','fees.read','fees.manage','receipts.create','reports.read','payroll.read','payroll.manage','payroll.pay'],
+      approver:['expenses.read','expenses.approve','expenses.pay','reports.read','payroll.approve','migration.approve'],
+      auditor:['students.read','fees.read','ledger.read','expenses.read','bank.read','reports.read','reports.export','audit.read'],
+    };
+    const membership=await withSchoolTransaction(schoolId,async client=>{
+      await client.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[schoolId,input.schoolName.trim(),schoolCode]);
+      for(const code of permissionCodes)await client.query(
+        'INSERT INTO permissions (code,description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING',
+        [code,code.replaceAll('.',' ')]);
+      const roleIds:Record<string,string>={};
+      for(const [roleName,codes] of Object.entries(rolePermissions)){
+        const roleId=randomUUID();roleIds[roleName]=roleId;
+        await client.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[roleId,schoolId,roleName]);
+        for(const code of codes)await client.query(
+          'INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING',[roleId,code]);
+      }
+      await client.query(
+        "INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,'active')",
+        [schoolId,auth.userId,roleIds.school_admin]);
+      const yearId=randomUUID();
+      await client.query(
+        'INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',
+        [yearId,schoolId,financialYear.name,financialYear.startsOn,financialYear.endsOn]);
+      for(const period of financialYear.periods)await client.query(
+        'INSERT INTO accounting_periods (school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4)',
+        [schoolId,yearId,period.startsOn,period.endsOn]);
+      const accounts=[
+        ['1000','Cash on hand','asset'],['1100','Bank account','asset'],['1200','Fees receivable','asset'],
+        ['2000','Accounts payable','liability'],['3000','Opening fund balance','equity'],
+        ['4000','School fee income','income'],['4100','Other income','income'],['4200','Fee waivers (contra-income)','income'],
+        ['5000','Teaching and learning expenses','expense'],['5100','Administration expenses','expense'],
+      ];
+      for(const [code,name,type] of accounts)await client.query(
+        'INSERT INTO accounts (school_id,code,name,account_type) VALUES ($1,$2,$3,$4)',[schoolId,code,name,type]);
+      await client.query(
+        "INSERT INTO audit_events (school_id,actor_user_id,action,entity_type,entity_id,metadata) VALUES ($1,$2,'school.create','school',$3,$4::jsonb)",
+        [schoolId,auth.userId,schoolId,JSON.stringify({schoolCode,createdBy:auth.email,sourceSchoolId:auth.schoolId})]);
+      const permissions=await client.query(
+        'SELECT permission_code FROM role_permissions WHERE role_id=$1 ORDER BY permission_code',[roleIds.school_admin]);
+      return permissions.rows.map(row=>String(row.permission_code));
+    });
+    const issued=await createSession(auth.userId,schoolId);
+    res.status(201).json({
+      token:issued.token,tokenType:'Bearer',expiresAt:issued.expiresAt.toISOString(),
+      user:{id:auth.userId,email:auth.email,fullName:auth.fullName,mustChangePassword:false},
+      school:{id:schoolId,name:input.schoolName.trim()},role:'school_admin',permissions:membership,
+      created:true,message:'School workspace created. Your account is its first school administrator.',
+    });
+  }catch(error){next(error);}
+});
+
 app.get('/api/v1/auth/workspaces',requireAuth,async(req,res,next)=>{
   try{
     const auth=authContext(req);
