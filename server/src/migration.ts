@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { Router, type Request, type Response, type NextFunction } from 'express';
+import express, { Router, type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';
 import { authContext, requireAuth, requirePermission } from './auth.js';
 import { withSchoolTransaction } from './db.js';
 import { audit, postJournal } from './operations.js';
 import { parseKesToMinorUnits } from './domain/ledger.js';
+import { parseMigrationImportFile } from './migration-import.js';
 
 export const migrationRouter = Router();
 migrationRouter.use(requireAuth);
@@ -53,6 +54,26 @@ function money(value:string):bigint {
   try { return parseKesToMinorUnits(value); }
   catch { return fail('Amounts must be valid KES values with no more than two decimal places.',422); }
 }
+
+// Uploads are parsed for preview only. The response is never written to the ledger.
+migrationRouter.post('/migration/batches/:batchId/import-preview',
+  requirePermission('migration.manage'),
+  express.raw({type:'*/*',limit:'5mb'}),
+  wrap(async(req,res)=>{
+    const auth=authContext(req);
+    const batchId=z.string().uuid().safeParse(req.params.batchId);
+    if(!batchId.success)fail('Invalid migration batch ID.',400);
+    const batch=await withSchoolTransaction(auth.schoolId,async client=>
+      client.query('SELECT status FROM migration_batches WHERE school_id=$1 AND id=$2',[auth.schoolId,batchId.data]));
+    if(!batch.rowCount)fail('Migration batch not found.',404);
+    if(batch.rows[0].status!=='draft')fail('Import preview is available only for draft migration batches.',409);
+    if(!Buffer.isBuffer(req.body))fail('Upload the file as a raw request body with its original file name in the X-File-Name header.',400);
+    const fileName=(req.header('x-file-name')??'').trim().slice(0,120);
+    if(!fileName)fail('The X-File-Name header is required.',400);
+    const preview=await parseMigrationImportFile(fileName,req.body);
+    res.json({preview,mappingRequired:true,postingPerformed:false});
+  })
+);
 
 migrationRouter.post('/migration/batches',requirePermission('migration.manage'),wrap(async(req,res)=>{
   const parsed=createBatchSchema.safeParse(req.body);
