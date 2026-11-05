@@ -59,7 +59,10 @@ function extract(sheet: ExcelJS.Worksheet, format: 'csv' | 'xlsx'): ParsedMigrat
     return reject(`The import file cannot exceed ${MIGRATION_IMPORT_LIMITS.maxColumns} columns.`);
   }
   const headerRow = sheet.getRow(1);
-  const headers = headerRow.values.slice(1).map((_, index) => cellText(headerRow.getCell(index + 1), format));
+  const headers: string[] = [];
+  for (let index = 1; index <= sheet.columnCount; index += 1) {
+    headers.push(cellText(headerRow.getCell(index), format));
+  }
   while (headers.length && headers[headers.length - 1] === '') headers.pop();
   if (!headers.length || headers.some(header => !header)) return reject('Every column must have a non-empty header.');
   const normalized = headers.map(header => header.toLocaleLowerCase('en'));
