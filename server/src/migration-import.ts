@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 
 export const MIGRATION_IMPORT_LIMITS = {
   maxBytes: 5 * 1024 * 1024,
-  maxRows: 5_000,
+  maxRows: 500,
   maxColumns: 50,
 } as const;
 
