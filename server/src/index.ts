@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { authContext, createSession, hashPassword, hashToken, requireAuth, requirePermission, safeSecretEquals, verifyPassword } from './auth.js';
 import { pool, requirePool, withSchoolTransaction } from './db.js';
 import { operationsRouter } from './operations.js';
+import { migrationRouter } from './migration.js';
 import { studentProfileEditRouter } from './student-profile-edit.js';
 import { academicTermsRouter } from './academic-terms.js';
 import { payrollRouter } from './payroll.js';
@@ -145,15 +146,16 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
         'receipts.create','ledger.read','ledger.post','expenses.read','expenses.create',
         'expenses.approve','expenses.pay','bank.read','bank.reconcile','reports.read','reports.export',
         'periods.manage','audit.read','payroll.read','payroll.manage','payroll.approve','payroll.pay',
+        'migration.manage','migration.approve',
       ];
       for (const code of permissionCodes) {
         await client.query('INSERT INTO permissions (code,description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING', [code, code.replaceAll('.', ' ')]);
       }
       const rolePermissions: Record<string, string[]> = {
         school_admin: permissionCodes,
-        accountant: ['students.read','fees.read','receipts.create','ledger.read','ledger.post','expenses.read','expenses.create','bank.read','bank.reconcile','reports.read','reports.export','audit.read','payroll.read','payroll.pay'],
+        accountant: ['students.read','fees.read','receipts.create','ledger.read','ledger.post','expenses.read','expenses.create','bank.read','bank.reconcile','reports.read','reports.export','audit.read','payroll.read','payroll.pay','migration.manage'],
         bursar: ['students.read','fees.read','fees.manage','receipts.create','reports.read','payroll.read','payroll.manage','payroll.pay'],
-        approver: ['expenses.read','expenses.approve','expenses.pay','reports.read','payroll.approve'],
+        approver: ['expenses.read','expenses.approve','expenses.pay','reports.read','payroll.approve','migration.approve'],
         auditor: ['students.read','fees.read','ledger.read','expenses.read','bank.read','reports.read','reports.export','audit.read'],
       };
       const roleIds: Record<string,string> = {};
@@ -563,6 +565,7 @@ app.use('/api/v1', studentProfileEditRouter);
 app.use('/api/v1', academicTermsRouter);
 app.use('/api/v1', payrollRouter);
 app.use('/api/v1', operationsRouter);
+app.use('/api/v1', migrationRouter);
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(resolve(process.cwd(), 'dist'), { index: false, maxAge: '1h' }));
   app.get(/.*/, (req, res, next) => {
