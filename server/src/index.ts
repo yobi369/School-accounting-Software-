@@ -324,7 +324,7 @@ app.post('/api/v1/auth/accept-invitation',requireAuth,async(req,res,next)=>{
 const createSchoolSchema = z.object({
   schoolName: z.string().trim().min(2).max(160),
   schoolCode: z.string().trim().min(2).max(24).regex(/^[a-zA-Z0-9_-]+$/),
-  financialYearStart: z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/).optional(),
+  financialYearStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 });
 app.get('/api/v1/platform/access',requireAuth,async(req,res,next)=>{
   try{
