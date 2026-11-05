@@ -27,6 +27,8 @@ Use a **synthetic school and synthetic records only** until every gate passes. T
 | A12 | Backup and restore | Take an encrypted backup in the actual hosting provider, restore it to a new disposable database, and compare migration checksums, record counts, journal totals, allocations, school isolation, login, and reports. Never restore over the live database. |
 | A13 | Security and privacy | Confirm HTTPS, required response headers, rate limiting, log redaction, least-privilege database role, RLS, secret rotation, access removal, retention policy, privacy notice, and the school's Kenya Data Protection Act obligations. |
 | A14 | Operational recovery | Simulate database unavailability and a failed migration in a non-production environment. Verify readiness goes unhealthy, alerts reach the operator, and the documented recovery procedure works. |
+| A15 | Additional school provisioning | Sign in as the original platform administrator, create a second synthetic school without a bootstrap token, and confirm the new workspace has its own school ID, roles, permissions, financial year, periods, starter accounts, and audit event. Confirm the account can switch between both schools. |
+| A16 | Platform provisioning authorization | Sign in as an ordinary school administrator from a non-platform school and attempt `GET /api/v1/platform/access` and `POST /api/v1/platform/schools`. The first must report `canCreateSchool: false`; the second must return 403. Confirm the account cannot add itself to the platform-administrator registry. |
 
 ## Independent accounting fixture
 
