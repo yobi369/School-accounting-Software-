@@ -166,7 +166,7 @@
 
 
 /* Financial year and accounting period — clear selected-range hierarchy */
-.sl-period-selection{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:-2px 0 16px}
+.sl-period-selection{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:12px;margin:-2px 0 16px}
 .sl-period-selection-item{display:grid;gap:5px;min-width:0;padding:14px 16px;background:#fff;border:1px solid #dfe9e2;border-left:3px solid #43815f;border-radius:10px}
 .sl-period-selection-item>span,.sl-period-register-date>span,.sl-period-register-year>span{font-size:9px;font-weight:850;letter-spacing:1.05px;color:#789080}
 .sl-period-selection-item strong{font-size:15px;line-height:1.35;color:#214b38;overflow-wrap:anywhere}
