@@ -36,6 +36,13 @@ describe('buildFinancialYearCalendar', () => {
     expect(year.endsOn).toBe('2027-01-30');
   });
 
+  it('keeps a leap-day start anchored to the last valid February in the following year', () => {
+    const year = buildFinancialYearCalendar('2024-02-29');
+    expect(year.endsOn).toBe('2025-02-28');
+    expect(year.periods[0]).toEqual({ startsOn: '2024-02-29', endsOn: '2024-02-29' });
+    expect(year.periods[year.periods.length - 1]).toEqual({ startsOn: '2025-02-01', endsOn: '2025-02-28' });
+  });
+
   it('rejects impossible and out-of-range dates', () => {
     expect(() => buildFinancialYearCalendar('2026-02-30')).toThrow(/valid calendar date/i);
     expect(() => buildFinancialYearCalendar('1999-01-01')).toThrow(/between 2000 and 2200/i);

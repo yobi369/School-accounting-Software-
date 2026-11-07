@@ -23,7 +23,7 @@ The application is a Node.js/TypeScript service and PostgreSQL database, not a s
 2. Install dependencies and build:
 
    ```sh
-   npm install
+   npm ci
    npm run typecheck
    npm test
    npm run build

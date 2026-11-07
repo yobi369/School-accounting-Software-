@@ -28,8 +28,16 @@ export function buildFinancialYearCalendar(startDate: string): FinancialYearCale
   const targetYear = start.getUTCFullYear() + 1;
   const targetMonth = start.getUTCMonth();
   const lastTargetDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
-  const endExclusive = new Date(Date.UTC(targetYear, targetMonth, Math.min(start.getUTCDate(), lastTargetDay)));
-  const end = new Date(endExclusive.getTime() - 24 * 60 * 60 * 1000);
+  const normalizedBoundaryDay = Math.min(start.getUTCDate(), lastTargetDay);
+  const endExclusive = new Date(Date.UTC(targetYear, targetMonth, normalizedBoundaryDay));
+  const standardEnd = new Date(endExclusive.getTime() - 24 * 60 * 60 * 1000);
+
+  // A February 29 start is a valid school-year anchor, but JavaScript rolls it to March 1 in the following year.
+  // Keep the leap-day year boundary anchored on the actual last valid day of February instead of silently shifting forward.
+  const end = start.getUTCMonth() === 1 && start.getUTCDate() === 29
+    ? new Date(Date.UTC(targetYear, targetMonth + 1, 0))
+    : standardEnd;
+
   const startsOn = dateString(start);
   const endsOn = dateString(end);
   const startYear = start.getUTCFullYear();

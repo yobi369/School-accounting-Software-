@@ -495,6 +495,172 @@ describe.skipIf(!enabled)('PostgreSQL tenant and ledger integration', () => {
     }
   });
 
+  it('enforces financial-year and accounting-period date boundaries without overlap', async () => {
+    const schoolId=randomUUID(),yearId=randomUUID(),periodId=randomUUID();
+    const code='CAL'+randomUUID().replaceAll('-','').slice(0,9).toUpperCase();
+    await withSchoolTransaction(schoolId,async c=>{
+      await c.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[schoolId,'Accounting Calendar Test School',code]);
+      await c.query('INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',[yearId,schoolId,'2026','2026-01-01','2026-12-31']);
+      await c.query('INSERT INTO accounting_periods (id,school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',[periodId,schoolId,yearId,'2026-01-01','2026-01-31']);
+    });
+
+    await expect(withSchoolTransaction(schoolId,c=>c.query(
+      'INSERT INTO accounting_periods (id,school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',
+      [randomUUID(),schoolId,yearId,'2025-12-31','2026-01-31'],
+    ))).rejects.toThrow(/within the selected financial year/);
+
+    await expect(withSchoolTransaction(schoolId,c=>c.query(
+      'INSERT INTO accounting_periods (id,school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',
+      [randomUUID(),schoolId,yearId,'2026-01-15','2026-02-15'],
+    ))).rejects.toThrow(/may not overlap/);
+
+    await expect(withSchoolTransaction(schoolId,c=>c.query(
+      'UPDATE financial_years SET ends_on=$3 WHERE school_id=$1 AND id=$2',
+      [schoolId,yearId,'2026-01-15'],
+    ))).rejects.toThrow(/contain all existing accounting periods/);
+
+    await expect(withSchoolTransaction(schoolId,c=>c.query(
+      'INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5)',
+      [randomUUID(),schoolId,'2026 overlap','2026-06-01','2027-05-31'],
+    ))).rejects.toThrow(/may not overlap/);
+  });
+
+  it('requires accounting closure reasons and prevents premature financial-year close', async () => {
+    const schoolId=randomUUID(),userId=randomUUID(),roleId=randomUUID();
+    const yearId=randomUUID(),futureYearId=randomUUID(),periodId=randomUUID(),futurePeriodId=randomUUID();
+    const code='CLOSE'+randomUUID().replaceAll('-','').slice(0,8).toUpperCase();
+    await withSchoolTransaction(schoolId,async c=>{
+      await c.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[schoolId,'Accounting Closure Test School',code]);
+      await c.query('INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',[userId,'close-'+code.toLowerCase()+'@example.test','test-hash','Closure Tester']);
+      await c.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[roleId,schoolId,'closure_tester']);
+      await c.query("INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,'active')",[schoolId,userId,roleId]);
+      await c.query("INSERT INTO permissions (code,description) VALUES ('periods.manage','Manage accounting periods') ON CONFLICT (code) DO NOTHING");
+      await c.query("INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,'periods.manage') ON CONFLICT DO NOTHING",[roleId]);
+      await c.query('INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5),($6,$2,$7,$8,$9)',[
+        yearId,schoolId,'2026','2026-01-01','2026-12-31',futureYearId,'2099','2099-01-01','2099-12-31',
+      ]);
+      await c.query('INSERT INTO accounting_periods (id,school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5),($6,$2,$7,$8,$9)',[
+        periodId,schoolId,yearId,'2026-01-01','2026-01-31',futurePeriodId,futureYearId,'2099-01-01','2099-01-31',
+      ]);
+    });
+    const session=await createSession(userId,schoolId);
+    const app=express();app.use(express.json());app.use('/api/v1',operationsRouter);
+    const server=app.listen(0,'127.0.0.1');
+    try{
+      await new Promise<void>((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject);});
+      const address=server.address();
+      if(!address||typeof address==='string')throw new Error('Accounting closure test server did not bind to a TCP port.');
+      const base='http://127.0.0.1:'+address.port;
+      const post=async(path:string,body:unknown)=>{
+        const response=await fetch(base+path,{method:'POST',headers:{Authorization:'Bearer '+session.token,'Content-Type':'application/json'},body:JSON.stringify(body)});
+        return {status:response.status,body:await response.json() as Record<string,unknown>};
+      };
+
+      const missingLockReason=await post('/api/v1/accounting/periods/'+periodId+'/lock',{});
+      expect(missingLockReason.status).toBe(400);
+      const prematurePeriodLock=await post('/api/v1/accounting/periods/'+futurePeriodId+'/lock',{reason:'Prevent posting into a future month.'});
+      expect(prematurePeriodLock.status).toBe(409);
+      expect(prematurePeriodLock.body.error).toContain('after its end date');
+      const locked=await post('/api/v1/accounting/periods/'+periodId+'/lock',{reason:'Month-end reconciliation completed.'});
+      expect(locked.status).toBe(200);
+      const lockAudit=await withSchoolTransaction(schoolId,c=>c.query(
+        "SELECT metadata->>'reason' AS reason FROM audit_events WHERE school_id=$1 AND action='accounting.period.lock' AND entity_id=$2",
+        [schoolId,periodId],
+      ));
+      expect(lockAudit.rows[0].reason).toBe('Month-end reconciliation completed.');
+
+      const missingCloseReason=await post('/api/v1/accounting/years/'+futureYearId+'/close',{});
+      expect(missingCloseReason.status).toBe(400);
+      const prematureClose=await post('/api/v1/accounting/years/'+futureYearId+'/close',{reason:'All accounts reviewed.'});
+      expect(prematureClose.status).toBe(409);
+      expect(prematureClose.body.error).toContain('after its end date');
+      const yearState=await withSchoolTransaction(schoolId,c=>c.query(
+        'SELECT status FROM financial_years WHERE school_id=$1 AND id=$2',[schoolId,futureYearId],
+      ));
+      expect(yearState.rows[0].status).toBe('open');
+    }finally{
+      await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
+    }
+  });
+
+  it('closes a completed financial year and carries balance-sheet balances forward', async () => {
+    const schoolId=randomUUID(),userId=randomUUID(),roleId=randomUUID();
+    const yearId=randomUUID(),periodId=randomUUID(),nextYearId=randomUUID(),nextPeriodId=randomUUID();
+    const cashId=randomUUID(),incomeId=randomUUID(),equityId=randomUUID(),journalId=randomUUID();
+    const code='YEAR'+randomUUID().replaceAll('-','').slice(0,8).toUpperCase();
+    await withSchoolTransaction(schoolId,async c=>{
+      await c.query('INSERT INTO schools (id,name,code) VALUES ($1,$2,$3)',[schoolId,'Year-End Close Test School',code]);
+      await c.query('INSERT INTO users (id,email,password_hash,full_name) VALUES ($1,$2,$3,$4)',[userId,'year-close-'+code.toLowerCase()+'@example.test','test-hash','Year-End Tester']);
+      await c.query('INSERT INTO roles (id,school_id,name) VALUES ($1,$2,$3)',[roleId,schoolId,'year_close_tester']);
+      await c.query("INSERT INTO school_memberships (school_id,user_id,role_id,status) VALUES ($1,$2,$3,'active')",[schoolId,userId,roleId]);
+      await c.query("INSERT INTO permissions (code,description) VALUES ('periods.manage','Manage accounting periods') ON CONFLICT (code) DO NOTHING");
+      await c.query("INSERT INTO role_permissions (role_id,permission_code) VALUES ($1,'periods.manage') ON CONFLICT DO NOTHING",[roleId]);
+      await c.query('INSERT INTO financial_years (id,school_id,name,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5),($6,$2,$7,$8,$9)',[
+        yearId,schoolId,'2025','2025-01-01','2025-12-31',nextYearId,'2026','2026-01-01','2026-12-31',
+      ]);
+      await c.query('INSERT INTO accounting_periods (id,school_id,financial_year_id,starts_on,ends_on) VALUES ($1,$2,$3,$4,$5),($6,$2,$7,$8,$9)',[
+        periodId,schoolId,yearId,'2025-01-01','2025-12-31',nextPeriodId,nextYearId,'2026-01-01','2026-12-31',
+      ]);
+      await c.query('INSERT INTO accounts (id,school_id,code,name,account_type) VALUES ($1,$2,$3,$4,$5),($6,$2,$7,$8,$9),($10,$2,$11,$12,$13)',[
+        cashId,schoolId,'1000','Cash','asset',incomeId,'4000','School fee income','income',equityId,'3000','Opening fund balance','equity',
+      ]);
+      await c.query(
+        "INSERT INTO journal_entries (id,school_id,financial_year_id,period_id,entry_number,posting_date,description,status,source_type,created_by) VALUES ($1,$2,$3,$4,1,'2025-12-31','Year-end test income','draft','test',$5)",
+        [journalId,schoolId,yearId,periodId,userId],
+      );
+      await c.query(
+        'INSERT INTO journal_lines (school_id,journal_entry_id,account_id,line_number,debit,credit) VALUES ($1,$2,$3,1,100.00,0),($1,$2,$4,2,0,100.00)',
+        [schoolId,journalId,cashId,incomeId],
+      );
+      await c.query("UPDATE journal_entries SET status='posted' WHERE school_id=$1 AND id=$2",[schoolId,journalId]);
+    });
+
+    const session=await createSession(userId,schoolId);
+    const app=express();app.use(express.json());app.use('/api/v1',operationsRouter);
+    const server=app.listen(0,'127.0.0.1');
+    try{
+      await new Promise<void>((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject);});
+      const address=server.address();
+      if(!address||typeof address==='string')throw new Error('Year-end close test server did not bind to a TCP port.');
+      const response=await fetch('http://127.0.0.1:'+address.port+'/api/v1/accounting/years/'+yearId+'/close',{
+        method:'POST',
+        headers:{Authorization:'Bearer '+session.token,'Content-Type':'application/json'},
+        body:JSON.stringify({reason:'Year reconciled and approved for closure.'}),
+      });
+      expect(response.status).toBe(200);
+      const result=await response.json() as {financialYear:{status:string;closingJournalId:string|null;openingJournalId:string|null;nextFinancialYearId:string}};
+      expect(result.financialYear).toMatchObject({status:'closed',nextFinancialYearId:nextYearId});
+      expect(result.financialYear.closingJournalId).toBeTruthy();
+      expect(result.financialYear.openingJournalId).toBeTruthy();
+
+      const state=await withSchoolTransaction(schoolId,async c=>{
+        const year=await c.query('SELECT status FROM financial_years WHERE school_id=$1 AND id=$2',[schoolId,yearId]);
+        const period=await c.query('SELECT status FROM accounting_periods WHERE school_id=$1 AND id=$2',[schoolId,periodId]);
+        const opening=await c.query(
+          `SELECT a.code,l.debit::text,l.credit::text
+           FROM journal_entries j JOIN journal_lines l ON l.school_id=j.school_id AND l.journal_entry_id=j.id
+           JOIN accounts a ON a.school_id=l.school_id AND a.id=l.account_id
+           WHERE j.school_id=$1 AND j.id=$2 ORDER BY a.code`,
+          [schoolId,result.financialYear.openingJournalId],
+        );
+        const closing=await c.query(
+          "SELECT metadata->>'reason' AS reason FROM audit_events WHERE school_id=$1 AND action='accounting.year.close' AND entity_id=$2",
+          [schoolId,yearId],
+        );
+        return {year:year.rows[0],period:period.rows[0],opening:opening.rows,closing:closing.rows[0]};
+      });
+      expect(state.year.status).toBe('closed');
+      expect(state.period.status).toBe('locked');
+      expect(state.opening).toEqual([
+        {code:'1000',debit:'100.00',credit:'0.00'},
+        {code:'3000',debit:'0.00',credit:'100.00'},
+      ]);
+      expect(state.closing.reason).toBe('Year reconciled and approved for closure.');
+    }finally{
+      await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
+    }
+  });
+
 });
 
 afterAll(async () => { await pool?.end(); });

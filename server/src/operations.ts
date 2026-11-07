@@ -1333,30 +1333,45 @@ operationsRouter.post('/ledger/journals/:id/reverse',requirePermission('ledger.p
 }));
 
 operationsRouter.post('/accounting/periods/:id/lock',requirePermission('periods.manage'),wrap(async(req,res)=>{
-  const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid accounting period ID.'});return;}
+  const id=z.string().uuid().safeParse(req.params.id);
+  const body=z.object({reason:z.string().trim().min(8).max(500)}).safeParse(req.body);
+  if(!id.success||!body.success){res.status(400).json({error:'A valid accounting period ID and lock reason of at least 8 characters are required.'});return;}
   const auth=authContext(req);
   try{
     const period=await withSchoolTransaction(auth.schoolId,async c=>{
-      const r=await c.query("SELECT id,status FROM accounting_periods WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
-      if(!r.rowCount)throw Object.assign(new Error('Accounting period not found.'),{statusCode:404});
-      if(r.rows[0].status==='locked')return {id:id.data,status:'locked'};
-      const drafts=await c.query("SELECT count(*)::int AS n FROM journal_entries WHERE school_id=$1 AND period_id=$2 AND status='draft'",[auth.schoolId,id.data]);
+    const r=await c.query(
+      `SELECT p.id,p.status,p.ends_on,(now() AT TIME ZONE s.timezone)::date AS school_today
+       FROM accounting_periods p JOIN schools s ON s.id=p.school_id
+       WHERE p.school_id=$1 AND p.id=$2 FOR UPDATE OF p`,
+      [auth.schoolId,id.data]);
+    if(!r.rowCount)throw Object.assign(new Error('Accounting period not found.'),{statusCode:404});
+    if(r.rows[0].status==='locked')return {id:id.data,status:'locked'};
+    if(sqlDate(r.rows[0].ends_on)>=sqlDate(r.rows[0].school_today))throw Object.assign(new Error('An accounting period can only be locked after its end date.'),{statusCode:409});
+    const drafts=await c.query("SELECT count(*)::int AS n FROM journal_entries WHERE school_id=$1 AND period_id=$2 AND status='draft'",[auth.schoolId,id.data]);
       if(drafts.rows[0].n>0)throw Object.assign(new Error('Post or discard all draft journals before locking this period.'),{statusCode:409});
       await c.query("UPDATE accounting_periods SET status='locked' WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data]);
-      await audit(c,auth.schoolId,auth.userId,'accounting.period.lock','accounting_period',id.data);
+      await audit(c,auth.schoolId,auth.userId,'accounting.period.lock','accounting_period',id.data,{reason:body.data.reason});
       return {id:id.data,status:'locked'};
     });
     res.json({period});
   }catch(error){if(!handleError(res,error))throw error;}
 }));
 operationsRouter.post('/accounting/years/:id/close',requirePermission('periods.manage'),wrap(async(req,res)=>{
-  const id=z.string().uuid().safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid financial year ID.'});return;}
+  const id=z.string().uuid().safeParse(req.params.id);
+  const body=z.object({reason:z.string().trim().min(8).max(500)}).safeParse(req.body);
+  if(!id.success||!body.success){res.status(400).json({error:'A valid financial year ID and closure reason of at least 8 characters are required.'});return;}
   const auth=authContext(req);
   try{
     const year=await withSchoolTransaction(auth.schoolId,async c=>{
-      const r=await c.query("SELECT id,status,name,starts_on,ends_on FROM financial_years WHERE school_id=$1 AND id=$2 FOR UPDATE",[auth.schoolId,id.data]);
+      const r=await c.query(
+        `SELECT y.id,y.status,y.name,y.starts_on,y.ends_on,
+          (now() AT TIME ZONE s.timezone)::date AS school_today
+         FROM financial_years y JOIN schools s ON s.id=y.school_id
+         WHERE y.school_id=$1 AND y.id=$2 FOR UPDATE OF y`,
+        [auth.schoolId,id.data]);
       if(!r.rowCount)throw Object.assign(new Error('Financial year not found.'),{statusCode:404});
       if(r.rows[0].status==='closed')return {id:id.data,status:'closed',closingJournalId:null,openingJournalId:null};
+      if(sqlDate(r.rows[0].ends_on)>=sqlDate(r.rows[0].school_today))throw Object.assign(new Error('A financial year can only be closed after its end date.'),{statusCode:409});
       const periods=await c.query("SELECT id,status,ends_on FROM accounting_periods WHERE school_id=$1 AND financial_year_id=$2 ORDER BY ends_on",[auth.schoolId,id.data]);
       if(!periods.rowCount)throw Object.assign(new Error('The financial year has no accounting periods.'),{statusCode:409});
       const last=periods.rows[periods.rows.length-1];
@@ -1437,7 +1452,7 @@ operationsRouter.post('/accounting/years/:id/close',requirePermission('periods.m
       }
       await c.query("UPDATE accounting_periods SET status='locked' WHERE school_id=$1 AND id=$2",[auth.schoolId,last.id]);
       await c.query("UPDATE financial_years SET status='closed' WHERE school_id=$1 AND id=$2",[auth.schoolId,id.data]);
-      await audit(c,auth.schoolId,auth.userId,'accounting.year.close','financial_year',id.data,{closingJournalId,openingJournalId,nextFinancialYearId:nextYearId});
+      await audit(c,auth.schoolId,auth.userId,'accounting.year.close','financial_year',id.data,{reason:body.data.reason,closingJournalId,openingJournalId,nextFinancialYearId:nextYearId});
       return {id:id.data,status:'closed',closingJournalId,openingJournalId,nextFinancialYearId:nextYearId};
     });
     res.json({financialYear:year});

@@ -34,7 +34,7 @@ Follow the [Local Installation Guide](docs/LOCAL_INSTALLATION.md) to run a local
 Requirements: Node.js 22+ and PostgreSQL 16+.
 
 ```bash
-npm install
+npm ci
 cp .env.example .env
 # Configure DATABASE_URL, MIGRATIONS_DATABASE_URL and BOOTSTRAP_TOKEN.
 npm run db:migrate

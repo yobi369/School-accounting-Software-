@@ -98,6 +98,12 @@ const bootstrapSchema = z.object({
   password: z.string().min(12).max(200),
   financialYearStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 });
+async function assertUniqueSchoolCode(code: string): Promise<void> {
+  const result = await requirePool().query('SELECT 1 FROM schools WHERE lower(code) = lower($1) LIMIT 1', [code]);
+  if ((result.rowCount ?? 0) > 0) {
+    throw Object.assign(new Error('A school with this code already exists. Choose a unique school code.'), { statusCode: 409 });
+  }
+}
 app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
   try {
     const configured = process.env.BOOTSTRAP_TOKEN;
@@ -116,6 +122,7 @@ app.post('/api/v1/auth/bootstrap', async (req, res, next) => {
     const userId = randomUUID();
     const email = input.email.toLowerCase();
     const schoolCode = input.schoolCode.toUpperCase();
+    await assertUniqueSchoolCode(schoolCode);
     const passwordHash = await hashPassword(input.password);
     let financialYear: ReturnType<typeof buildFinancialYearCalendar>;
     try {
@@ -347,6 +354,7 @@ app.post('/api/v1/platform/schools',requireAuth,async(req,res,next)=>{
     const input=parsed.data;
     const schoolId=randomUUID();
     const schoolCode=input.schoolCode.toUpperCase();
+    await assertUniqueSchoolCode(schoolCode);
     let financialYear:ReturnType<typeof buildFinancialYearCalendar>;
     try{financialYear=buildFinancialYearCalendar(input.financialYearStart??`${new Date().getFullYear()}-01-01`);}
     catch(error){res.status(400).json({error:error instanceof Error?error.message:'Financial year start date is invalid.'});return;}
@@ -673,6 +681,7 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   const code = (error as { code?: string })?.code;
   if (code === '23505') { res.status(409).json({error:'A record with these unique details already exists.'}); return; }
   if (code === '23503' || code === '23514' || code === '55000') { res.status(422).json({error:'The financial operation violates an accounting or data-integrity rule.'}); return; }
+  if (code === '23505') { res.status(409).json({error:'A school with this code already exists. Choose a unique school code.'}); return; }
   if (error instanceof Error && error.name === 'DatabaseUnavailableError') { res.status(503).json({error:'Database is not configured.'}); return; }
   process.stderr.write(`ShuleLedger API error: ${error instanceof Error ? error.message : 'unknown error'}\n`);
   res.status(500).json({error:'Internal server error.'});
