@@ -1,6 +1,25 @@
 # Precious SchoolBooks — Kenyan School Accounting Platform
 
+[![CI](https://github.com/yobi369/School-accounting-Software-/actions/workflows/ci.yml/badge.svg)](https://github.com/yobi369/School-accounting-Software-/actions/workflows/ci.yml)
+[![Production smoke test](https://github.com/yobi369/School-accounting-Software-/actions/workflows/production-smoke.yml/badge.svg)](https://github.com/yobi369/School-accounting-Software-/actions/workflows/production-smoke.yml)
+
 Precious SchoolBooks is a school-finance workspace for Kenyan primary and secondary schools. It is built around double-entry accounting, fee collection, controlled expenses, cash/bank reconciliation, financial reporting, and school-level access controls.
+
+**Live pilot:** [shuleledger.onrender.com](https://shuleledger.onrender.com) · **Local setup:** [Docker Compose installation guide](docs/LOCAL_INSTALLATION.md) · **Acceptance:** [School acceptance test](docs/SCHOOL_ACCEPTANCE_TEST.md)
+
+> **Pilot status:** The hosted service and automated smoke checks are available for evaluation. Do not enter real school financial records until the production checklist, recovery drill, role/RLS verification, and independent school-accountant acceptance are complete. Use synthetic data for demonstrations and testing.
+
+## Product capabilities at a glance
+
+| Area | Current capability |
+|---|---|
+| School finance | Double-entry journals, fee invoices, receipts, allocations and waivers |
+| Spending controls | Suppliers, expense approvals/payments, budgets and audit events |
+| Reconciliation | Bank CSV import, reconciliation, opening balances and period controls |
+| Reporting | 18 ledger-backed reports with CSV, XLSX and PDF exports |
+| Access control | School-scoped membership, server-side permissions and PostgreSQL RLS |
+| Offline behavior | Installable PWA shell and queued expense drafts only; drafts remain pending until server acceptance |
+
 
 ## Implemented foundations
 
@@ -77,6 +96,3 @@ The report API supports: trial balance, income statement, balance sheet, general
 
 M-Pesa, KRA eTIMS, SMS/email delivery, managed backup scheduling, multi-factor authentication, and external accountant acceptance are not complete integrations. Offline support currently queues expense drafts only; other financial actions require connectivity. CSV/XLSX/PDF exports are supported, but export contents still require reconciliation against the source ledger during acceptance.
 
-## License
-
-**Proprietary — all rights reserved.** This repository is not open source. See [LICENSE](LICENSE), [licensing policy](docs/LICENSING.md), and the [commercial license agreement template](docs/COMMERCIAL_LICENSE_AGREEMENT_TEMPLATE.md). The repository is currently public, so source files can still be viewed or downloaded; public visibility does not grant reuse rights. Review third-party licenses before any distribution.
