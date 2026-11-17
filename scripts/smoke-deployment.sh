@@ -11,9 +11,17 @@ esac
 base="${PRODUCTION_BASE_URL%/}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-curl --fail --silent --show-error --max-time 15 "$base/health" -o "$tmp/health.json"
-curl --fail --silent --show-error --max-time 15 "$base/ready" -o "$tmp/ready.json"
-curl --fail --silent --show-error --max-time 15 -D "$tmp/headers.txt" "$base/api/v1/status" -o "$tmp/status.json"
+
+# Render free instances can sleep between checks. Retry transient connection,
+# timeout, and 5xx failures without relaxing any response-body assertions below.
+request() {
+  curl --fail --silent --show-error \
+    --retry 2 --retry-all-errors --retry-delay 5 \
+    --connect-timeout 10 --max-time 20 "$@"
+}
+request "$base/health" -o "$tmp/health.json"
+request "$base/ready" -o "$tmp/ready.json"
+request "$base/api/v1/status" -D "$tmp/headers.txt" -o "$tmp/status.json"
 node --input-type=module - "$tmp" <<'NODE'
 import { readFileSync } from 'node:fs';
 const dir = process.argv[2];
