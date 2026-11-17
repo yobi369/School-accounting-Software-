@@ -46,7 +46,7 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: npm install
+        run: npm ci
       - name: Create least-privilege runtime role
         run: psql "$MIGRATIONS_DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE shuleledger_app LOGIN PASSWORD 'app-password' NOSUPERUSER NOBYPASSRLS;"
       - name: Apply database migrations
