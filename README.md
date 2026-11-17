@@ -5,7 +5,7 @@
 
 Precious SchoolBooks is a school-finance workspace for Kenyan primary and secondary schools. It is built around double-entry accounting, fee collection, controlled expenses, cash/bank reconciliation, financial reporting, and school-level access controls.
 
-**Live pilot:** [shuleledger.onrender.com](https://shuleledger.onrender.com) · **Local setup:** [Docker Compose installation guide](docs/LOCAL_INSTALLATION.md) · **Acceptance:** [School acceptance test](docs/SCHOOL_ACCEPTANCE_TEST.md)
+**Live pilot:** [shuleledger.onrender.com](https://shuleledger.onrender.com) · **Demo:** [Synthetic-data recruiter walkthrough](docs/DEMO_WALKTHROUGH.md) · **Local setup:** [Docker Compose installation guide](docs/LOCAL_INSTALLATION.md) · **Acceptance:** [School acceptance test](docs/SCHOOL_ACCEPTANCE_TEST.md)
 
 > **Pilot status:** The hosted service and automated smoke checks are available for evaluation. Do not enter real school financial records until the production checklist, recovery drill, role/RLS verification, and independent school-accountant acceptance are complete. Use synthetic data for demonstrations and testing.
 
