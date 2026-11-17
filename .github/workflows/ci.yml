@@ -32,7 +32,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - run: npm install
+      - run: npm ci
       - name: Audit dependency advisories
         run: |
           npm audit --json > /tmp/npm-audit.json || true
